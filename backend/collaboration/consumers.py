@@ -1,0 +1,153 @@
+"""
+WebSocket endpoint for real-time editing: ws/documents/<uuid>/
+
+Speaks the Yjs sync protocol, so the browser can use the standard
+`y-websocket` provider.
+
+Security
+--------
+* The user comes from the Django session cookie (AuthMiddlewareStack).
+* Access is checked on the SERVER before any document data is sent.
+* We accept the socket and then close it with an application code, so the
+  browser can show a clear message and stop reconnecting:
+      4401 = not logged in, 4403 = no access / not found, 4413 = message too big
+"""
+import logging
+
+from channels.db import database_sync_to_async
+from channels.generic.websocket import AsyncWebsocketConsumer
+from pycrdt import create_awareness_message, create_sync_message, create_update_message, handle_sync_message
+
+from documents.access import can_edit, get_document_and_role
+
+from . import protocol
+from .rooms import rooms
+
+logger = logging.getLogger(__name__)
+
+CLOSE_UNAUTHENTICATED = 4401
+CLOSE_FORBIDDEN = 4403
+CLOSE_TOO_LARGE = 4413
+MAX_MESSAGE_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+class DocumentConsumer(AsyncWebsocketConsumer):
+    room = None
+
+    async def connect(self):
+        self.document_id = str(self.scope["url_route"]["kwargs"]["document_id"])
+        self.group_name = f"document_{self.document_id}"
+        self.awareness_client_ids: set[int] = set()
+        user = self.scope.get("user")
+
+        await self.accept()
+
+        if not user or not user.is_authenticated:
+            await self.close(code=CLOSE_UNAUTHENTICATED)
+            return
+
+        document, role = await database_sync_to_async(get_document_and_role)(user, self.document_id)
+        if document is None:
+            await self.close(code=CLOSE_FORBIDDEN)
+            return
+
+        self.user = user
+        self.role = role
+        self.room = await rooms.join(self.document_id)
+        await self.channel_layer.group_add(self.group_name, self.channel_name)
+
+        # 1) Ask the client what it has that we don't (e.g. offline edits).
+        await self.send(bytes_data=create_sync_message(self.room.ydoc))
+        # 2) Tell the newcomer who is already here.
+        states = list(self.room.awareness.states.keys())
+        if states:
+            update = self.room.awareness.encode_awareness_update(states)
+            await self.send(bytes_data=create_awareness_message(update))
+
+    async def disconnect(self, code):
+        if self.room is None:
+            return
+        room = self.room
+        self.room = None
+        try:
+            await self.channel_layer.group_discard(self.group_name, self.channel_name)
+            # Remove this user's presence and tell the others.
+            ids = [cid for cid in self.awareness_client_ids if cid in room.awareness.states]
+            if ids:
+                room.awareness.remove_awareness_states(ids, origin=self.channel_name)
+                update = room.awareness.encode_awareness_update(ids)
+                await self.broadcast(create_awareness_message(update))
+        except Exception:
+            logger.exception("Error while cleaning up presence on document %s", self.document_id)
+        finally:
+            # Always release the room, so the document is saved and memory freed.
+            await rooms.leave(room)
+
+    async def receive(self, text_data=None, bytes_data=None):
+        if self.room is None or not bytes_data:
+            return
+        if len(bytes_data) > MAX_MESSAGE_BYTES:
+            await self.close(code=CLOSE_TOO_LARGE)
+            return
+        try:
+            await self.handle_message(bytes_data)
+        except Exception:
+            logger.warning("Invalid Yjs message on document %s", self.document_id, exc_info=True)
+
+    async def handle_message(self, message: bytes):
+        message_type = message[0]
+
+        if message_type == protocol.MSG_SYNC:
+            await self.handle_sync(message[1:])
+        elif message_type == protocol.MSG_AWARENESS:
+            await self.handle_awareness(message)
+        elif message_type == protocol.MSG_QUERY_AWARENESS:
+            states = list(self.room.awareness.states.keys())
+            if states:
+                update = self.room.awareness.encode_awareness_update(states)
+                await self.send(bytes_data=create_awareness_message(update))
+        # MSG_AUTH and unknown types are ignored.
+
+    async def handle_sync(self, payload: bytes):
+        sync_type = payload[0]
+
+        if sync_type == protocol.SYNC_STEP1:
+            # The client tells us what it has; reply with what it is missing.
+            reply = handle_sync_message(payload, self.room.ydoc)
+            if reply:
+                await self.send(bytes_data=reply)
+            return
+
+        if sync_type in (protocol.SYNC_STEP2, protocol.SYNC_UPDATE):
+            update, _ = protocol.read_var_bytes(payload, 1)
+            if update == protocol.EMPTY_UPDATE:
+                return
+            if not can_edit(self.role):
+                # Read-only users (Sprint 5) may not change the document.
+                return
+            self.room.ydoc.apply_update(update)
+            self.room.mark_dirty()
+            await self.broadcast(create_update_message(update))
+
+    async def handle_awareness(self, message: bytes):
+        payload, _ = protocol.read_var_bytes(message, 1)
+        self.room.awareness.apply_awareness_update(payload, origin=self.channel_name)
+        # Track only the clients the server actually accepted. (Per the Yjs
+        # protocol, an unknown client's first state with clock 0 is ignored.)
+        for client_id, _alive in protocol.awareness_client_states(payload):
+            if client_id in self.room.awareness.states:
+                self.awareness_client_ids.add(client_id)
+            else:
+                self.awareness_client_ids.discard(client_id)
+        await self.broadcast(message)
+
+    # --- fan-out to the other users in the same document --------------------
+    async def broadcast(self, data: bytes):
+        await self.channel_layer.group_send(
+            self.group_name,
+            {"type": "yjs.message", "data": data, "sender": self.channel_name},
+        )
+
+    async def yjs_message(self, event):
+        if event["sender"] != self.channel_name:
+            await self.send(bytes_data=event["data"])
