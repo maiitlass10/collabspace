@@ -6,6 +6,7 @@ import Avatar from "../components/ui/Avatar.jsx";
 const NAV_ITEMS = [
   { to: "/", label: "مستنداتي", icon: "▦", end: true },
   { to: "/profile", label: "الملف الشخصي", icon: "◉" },
+  { to: "/settings", label: "الإعدادات", icon: "⚙" },
   { to: "/status", label: "حالة النظام", icon: "◎" },
 ];
 

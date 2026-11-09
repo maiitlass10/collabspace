@@ -152,3 +152,64 @@ class LoginLogoutTests(AuthTestMixin, TestCase):
         ]
         self.assertEqual(statuses[:10], [400] * 10)
         self.assertEqual(statuses[10], 429)
+
+
+class SettingsTests(AuthTestMixin, TestCase):
+    """Sprint 6: change display name and password."""
+
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_user(email="omar@example.com", password=STRONG_PASSWORD, display_name="عمر")
+        self.post("auth-login", {"email": "omar@example.com", "password": STRONG_PASSWORD})
+
+    def patch(self, name, data):
+        return self.client.patch(reverse(name), data, format="json", HTTP_X_CSRFTOKEN=self.get_csrf())
+
+    def test_change_display_name(self):
+        response = self.patch("auth-profile", {"display_name": "  عمر   خالد "})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["display_name"], "عمر خالد")
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.display_name, "عمر خالد")
+
+    def test_invalid_display_name(self):
+        for value in ["", "ع", "x" * 61]:
+            with self.subTest(value=value):
+                self.assertEqual(self.patch("auth-profile", {"display_name": value}).status_code, 400)
+
+    def test_email_cannot_be_changed_through_profile(self):
+        self.patch("auth-profile", {"email": "hacker@example.com", "display_name": "عمر"})
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, "omar@example.com")
+
+    def change_password(self, current, new, confirm=None):
+        return self.post(
+            "auth-password",
+            {"current_password": current, "new_password": new, "new_password_confirm": confirm or new},
+        )
+
+    def test_change_password_keeps_this_session(self):
+        new = "Brand#New2026pass"
+        self.assertEqual(self.change_password(STRONG_PASSWORD, new).status_code, 204)
+        self.assertTrue(self.client.get(reverse("auth-session")).json()["authenticated"], "still logged in")
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(new))
+
+    def test_change_password_errors(self):
+        cases = [
+            (("wrong-password", "Brand#New2026pass"), "current_password"),
+            ((STRONG_PASSWORD, "Brand#New2026pass", "different"), "new_password_confirm"),
+            ((STRONG_PASSWORD, "123"), "new_password"),
+            ((STRONG_PASSWORD, STRONG_PASSWORD), "new_password"),
+        ]
+        for args, field in cases:
+            with self.subTest(field=field, args=args):
+                response = self.change_password(*args)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(field, response.json())
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(STRONG_PASSWORD))
+
+    def test_settings_require_login(self):
+        self.post("auth-logout")
+        self.assertEqual(self.patch("auth-profile", {"display_name": "x y"}).status_code, 403)

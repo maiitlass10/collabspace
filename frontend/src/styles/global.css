@@ -1165,6 +1165,132 @@ a:hover {
   pointer-events: none;
 }
 
+/* ---------- Sprint 6: activity, versions, settings ---------- */
+.modal--wide {
+  max-width: 760px;
+}
+.modal-body {
+  max-height: min(70vh, 640px);
+  overflow-y: auto;
+}
+.workspace-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.chip-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.chip-btn:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+.activity-list,
+.version-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.activity-item {
+  display: flex;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+.activity-item:last-child {
+  border-bottom: none;
+}
+.activity-body p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.activity-time {
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.version-save {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 14px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--color-border);
+}
+.version-save .btn {
+  align-self: flex-start;
+}
+.version-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.version-item:hover {
+  background: var(--color-bg);
+}
+.version-name {
+  font-weight: 600;
+}
+.version-info {
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.version-meta {
+  margin: 0;
+  font-size: 13px;
+}
+.version-preview-frame {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: #fcfcfe;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.version-preview-content {
+  min-height: 200px;
+  padding: 20px 24px;
+}
+.version-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.settings-title {
+  margin: 0;
+  font-size: 18px;
+}
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 420px;
+}
+
 /* ---------- Sprint 5: tabs, roles, sharing ---------- */
 .tabs {
   display: flex;

@@ -73,3 +73,47 @@ class LoginSerializer(serializers.Serializer):
             )
         attrs["user"] = user
         return attrs
+
+
+class ProfileSerializer(serializers.ModelSerializer):
+    """Fields a user may change about themselves (settings page)."""
+
+    display_name = serializers.CharField(
+        min_length=2,
+        max_length=60,
+        trim_whitespace=True,
+        error_messages={
+            "min_length": "الاسم يجب أن يكون حرفين على الأقل.",
+            "max_length": "الاسم طويل جدًا (60 حرفًا كحد أقصى).",
+            "blank": "الاسم لا يمكن أن يكون فارغًا.",
+        },
+    )
+
+    class Meta:
+        model = User
+        fields = ["display_name"]
+
+    def validate_display_name(self, value):
+        return " ".join(value.split())
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True, trim_whitespace=False)
+    new_password = serializers.CharField(write_only=True, trim_whitespace=False)
+    new_password_confirm = serializers.CharField(write_only=True, trim_whitespace=False)
+
+    def validate_current_password(self, value):
+        if not self.context["request"].user.check_password(value):
+            raise serializers.ValidationError("كلمة المرور الحالية غير صحيحة.")
+        return value
+
+    def validate(self, attrs):
+        if attrs["new_password"] != attrs["new_password_confirm"]:
+            raise serializers.ValidationError({"new_password_confirm": "كلمتا المرور غير متطابقتين."})
+        if attrs["new_password"] == attrs["current_password"]:
+            raise serializers.ValidationError({"new_password": "اختر كلمة مرور مختلفة عن الحالية."})
+        try:
+            validate_password(attrs["new_password"], user=self.context["request"].user)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"new_password": list(exc.messages)})
+        return attrs

@@ -53,9 +53,12 @@ export function AuthProvider({ children }) {
     await authApi.session().catch(() => {});
   }, []);
 
+  // After the settings page saved new profile data.
+  const updateUser = useCallback((nextUser) => setUser(nextUser), []);
+
   const value = useMemo(
-    () => ({ user, status, login, register, logout, refresh }),
-    [user, status, login, register, logout, refresh]
+    () => ({ user, status, login, register, logout, refresh, updateUser }),
+    [user, status, login, register, logout, refresh, updateUser]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

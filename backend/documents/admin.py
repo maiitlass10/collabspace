@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Document, DocumentAccess
+from .models import ActivityLog, Document, DocumentAccess, DocumentVersion
 
 
 class DocumentAccessInline(admin.TabularInline):
@@ -18,3 +18,20 @@ class DocumentAdmin(admin.ModelAdmin):
     search_fields = ["title", "owner__email", "owner__display_name"]
     readonly_fields = ["id", "created_at", "updated_at"]
     inlines = [DocumentAccessInline]
+
+
+@admin.register(ActivityLog)
+class ActivityLogAdmin(admin.ModelAdmin):
+    list_display = ["created_at", "document", "actor", "action"]
+    list_filter = ["action"]
+    list_select_related = ["document", "actor"]
+    search_fields = ["document__title", "actor__email"]
+    readonly_fields = ["document", "actor", "action", "metadata", "created_at"]
+
+
+@admin.register(DocumentVersion)
+class DocumentVersionAdmin(admin.ModelAdmin):
+    list_display = ["created_at", "document", "label", "kind", "created_by"]
+    list_filter = ["kind"]
+    list_select_related = ["document", "created_by"]
+    readonly_fields = ["document", "created_by", "kind", "created_at"]

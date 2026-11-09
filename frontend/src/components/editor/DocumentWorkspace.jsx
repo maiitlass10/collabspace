@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link } from "react-router";
 import { useAuth } from "../../context/AuthContext.jsx";
 import useCollaboration from "../../hooks/useCollaboration.js";
@@ -5,12 +6,16 @@ import usePresence from "../../hooks/usePresence.js";
 import CollaborativeEditor from "./CollaborativeEditor.jsx";
 import ConnectionBadge from "./ConnectionBadge.jsx";
 import PresenceList from "./PresenceList.jsx";
+import ActivityPanel from "./ActivityPanel.jsx";
+import VersionsPanel from "./VersionsPanel.jsx";
 
 /** Mounted only after the REST API confirmed we may open this document. */
 export default function DocumentWorkspace({ documentId, readOnly = false, onAccessChanged }) {
   const { user } = useAuth();
   const { ydoc, provider, status, synced, fatalError } = useCollaboration(documentId, onAccessChanged);
   const users = usePresence(provider, user.id);
+  const [editor, setEditor] = useState(null);
+  const [panel, setPanel] = useState(null); // "activity" | "versions" | null
 
   if (fatalError) {
     return (
@@ -34,7 +39,15 @@ export default function DocumentWorkspace({ documentId, readOnly = false, onAcce
           <ConnectionBadge status={status} />
           {readOnly && <span className="readonly-badge">👁 للقراءة فقط</span>}
         </div>
-        {status === "connected" && <PresenceList users={users} />}
+        <div className="workspace-actions">
+          {status === "connected" && <PresenceList users={users} />}
+          <button type="button" className="chip-btn" onClick={() => setPanel("activity")}>
+            🕒 النشاط
+          </button>
+          <button type="button" className="chip-btn" onClick={() => setPanel("versions")}>
+            💾 الإصدارات
+          </button>
+        </div>
       </div>
       {ydoc && provider && (
         <CollaborativeEditor
@@ -44,8 +57,18 @@ export default function DocumentWorkspace({ documentId, readOnly = false, onAcce
           user={user}
           synced={synced}
           readOnly={readOnly}
+          onReady={setEditor}
         />
       )}
+
+      <ActivityPanel open={panel === "activity"} documentId={documentId} onClose={() => setPanel(null)} />
+      <VersionsPanel
+        open={panel === "versions"}
+        documentId={documentId}
+        canEdit={!readOnly && synced}
+        editor={editor}
+        onClose={() => setPanel(null)}
+      />
     </>
   );
 }

@@ -332,3 +332,161 @@ class MembersApiTests(SharingTestBase):
             self.client.post(self.members_url(), {"email": "nobody@example.com", "role": "viewer"}, format="json")
         response = self.client.post(self.members_url(), {"email": "bob@example.com", "role": "viewer"}, format="json")
         self.assertEqual(response.status_code, 429)
+
+
+# =============================================================================
+# Sprint 6: activity log and versions
+# =============================================================================
+import base64  # noqa: E402
+
+from pycrdt import Doc, Text  # noqa: E402
+
+from .activity import log_edit  # noqa: E402
+from .models import ActivityLog, DocumentVersion  # noqa: E402
+
+
+def yjs_state_with(text):
+    doc = Doc()
+    doc["content"] = t = Text()
+    t += text
+    return doc.get_update()
+
+
+def text_in(state):
+    doc = Doc()
+    doc.apply_update(state)
+    doc["content"] = t = Text()
+    return str(t)
+
+
+class ActivityTests(SharingTestBase):
+    def actions(self):
+        return list(ActivityLog.objects.filter(document=self.doc).order_by("created_at", "id").values_list("action", flat=True))
+
+    def test_create_and_rename_are_logged(self):
+        response = self.client.post(reverse("document-list"), {"title": "جديد"}, format="json")
+        doc = Document.objects.get(pk=response.json()["id"])
+        self.client.patch(self.detail_url(doc), {"title": "اسم آخر"}, format="json")
+        self.client.patch(self.detail_url(doc), {"title": "اسم آخر"}, format="json")  # no change: not logged
+        logs = list(ActivityLog.objects.filter(document=doc).order_by("created_at", "id"))
+        self.assertEqual([log.action for log in logs], ["created", "renamed"])
+        self.assertEqual(logs[1].metadata, {"from": "جديد", "to": "اسم آخر"})
+        self.assertEqual(logs[1].actor, self.alice)
+
+    def test_sharing_actions_are_logged(self):
+        self.client.post(self.members_url(), {"email": "bob@example.com", "role": "viewer"}, format="json")
+        bob = DocumentAccess.objects.get(user=self.bob)
+        self.client.patch(self.member_url(bob), {"role": "editor"}, format="json")
+        self.client.delete(self.member_url(bob))
+        carol = self.share(self.carol, ROLE_VIEWER)
+        self.as_user(self.carol)
+        self.client.delete(self.member_url(carol))  # Carol leaves
+
+        self.assertEqual(self.actions(), ["shared", "role_changed", "unshared", "left"])
+        role_change = ActivityLog.objects.get(action="role_changed")
+        self.assertEqual(role_change.metadata["target"], {"id": self.bob.pk, "display_name": "Bob"})
+        self.assertEqual((role_change.metadata["from"], role_change.metadata["to"]), ("viewer", "editor"))
+
+    def test_activity_endpoint(self):
+        ActivityLog.objects.create(document=self.doc, actor=self.alice, action="created")
+        ActivityLog.objects.create(document=self.doc, actor=self.alice, action="renamed", metadata={"from": "a", "to": "b"})
+        self.share(self.bob, ROLE_VIEWER)
+        self.as_user(self.bob)  # viewers can read the history too
+        body = self.client.get(reverse("document-activity", args=[self.doc.id])).json()
+        self.assertEqual([item["action"] for item in body["results"]], ["renamed", "created"], "newest first")
+        self.assertEqual(body["results"][0]["actor"]["display_name"], "Alice")
+        self.assertNotIn("email", body["results"][0]["actor"])
+
+        self.as_user(self.carol)
+        self.assertEqual(self.client.get(reverse("document-activity", args=[self.doc.id])).status_code, 404)
+
+    def test_history_survives_when_actor_is_deleted(self):
+        ActivityLog.objects.create(document=self.doc, actor=self.bob, action="edited")
+        self.bob.delete()
+        body = self.client.get(reverse("document-activity", args=[self.doc.id])).json()
+        self.assertIsNone(body["results"][0]["actor"])
+
+    def test_consecutive_edits_are_merged(self):
+        log_edit(self.doc.id, self.bob)
+        log_edit(self.doc.id, self.bob)
+        self.assertEqual(ActivityLog.objects.filter(action="edited").count(), 1)
+        log_edit(self.doc.id, self.carol)  # someone else: a new entry
+        log_edit(self.doc.id, self.bob)  # Bob again after Carol: a new entry
+        self.assertEqual(ActivityLog.objects.filter(action="edited").count(), 3)
+
+
+class VersionTests(SharingTestBase):
+    def setUp(self):
+        super().setUp()
+        self.doc.yjs_state = yjs_state_with("النسخة الأولى")
+        self.doc.save()
+
+    def versions_url(self):
+        return reverse("document-versions", args=[self.doc.id])
+
+    def version_url(self, version, suffix=""):
+        name = "document-version-restore" if suffix == "restore" else "document-version-detail"
+        return reverse(name, args=[self.doc.id, version.pk])
+
+    def test_save_list_and_preview_a_version(self):
+        response = self.client.post(self.versions_url(), {"label": "  مسودة   أولى "}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["label"], "مسودة أولى")
+        self.assertEqual(response.json()["created_by"]["display_name"], "Alice")
+        version = DocumentVersion.objects.get()
+
+        listed = self.client.get(self.versions_url()).json()
+        self.assertEqual(len(listed), 1)
+        self.assertNotIn("state", listed[0], "the list stays small")
+
+        detail = self.client.get(self.version_url(version)).json()
+        self.assertEqual(text_in(base64.b64decode(detail["state"])), "النسخة الأولى")
+        self.assertEqual(ActivityLog.objects.get().action, "version_saved")
+
+    def test_empty_document_cannot_be_saved(self):
+        empty = Document.objects.create(owner=self.alice, title="فارغ")
+        response = self.client.post(reverse("document-versions", args=[empty.id]), {}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_label_too_long(self):
+        response = self.client.post(self.versions_url(), {"label": "x" * 101}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_restore_saves_a_backup_first(self):
+        version = DocumentVersion.objects.create(
+            document=self.doc, created_by=self.alice, label="قديم", yjs_state=yjs_state_with("نص قديم")
+        )
+        response = self.client.post(self.version_url(version, "restore"))
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(text_in(base64.b64decode(body["version"]["state"])), "نص قديم")
+        backup = DocumentVersion.objects.get(pk=body["backup"]["id"])
+        self.assertEqual(backup.kind, DocumentVersion.KIND_BACKUP)
+        self.assertEqual(text_in(bytes(backup.yjs_state)), "النسخة الأولى", "the current content is kept")
+        self.assertEqual(ActivityLog.objects.get().action, "version_restored")
+
+    def test_viewer_can_preview_but_not_save_or_restore(self):
+        version = DocumentVersion.objects.create(document=self.doc, yjs_state=yjs_state_with("x"))
+        self.share(self.bob, ROLE_VIEWER)
+        self.as_user(self.bob)
+        self.assertEqual(self.client.get(self.versions_url()).status_code, 200)
+        self.assertEqual(self.client.get(self.version_url(version)).status_code, 200)
+        self.assertEqual(self.client.post(self.versions_url(), {}, format="json").status_code, 403)
+        self.assertEqual(self.client.post(self.version_url(version, "restore")).status_code, 403)
+        self.assertEqual(DocumentVersion.objects.count(), 1)
+
+    def test_editor_can_save_and_restore(self):
+        version = DocumentVersion.objects.create(document=self.doc, yjs_state=yjs_state_with("x"))
+        self.share(self.bob, ROLE_EDITOR)
+        self.as_user(self.bob)
+        self.assertEqual(self.client.post(self.versions_url(), {}, format="json").status_code, 201)
+        self.assertEqual(self.client.post(self.version_url(version, "restore")).status_code, 200)
+
+    def test_versions_of_other_documents_are_hidden(self):
+        other = Document.objects.create(owner=self.bob, title="لبوب", yjs_state=yjs_state_with("سر"))
+        secret = DocumentVersion.objects.create(document=other, yjs_state=yjs_state_with("سر"))
+        # Through Alice's own document id: 404.
+        self.assertEqual(self.client.get(self.version_url(secret)).status_code, 404)
+        # Directly: 404 as well.
+        url = reverse("document-version-detail", args=[other.id, secret.pk])
+        self.assertEqual(self.client.get(url).status_code, 404)

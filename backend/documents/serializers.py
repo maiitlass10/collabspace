@@ -4,7 +4,7 @@ from rest_framework import serializers
 from accounts.presence import presence_color
 
 from .access import role_for
-from .models import DEFAULT_TITLE, TITLE_MAX_LENGTH, Document, DocumentAccess
+from .models import DEFAULT_TITLE, TITLE_MAX_LENGTH, ActivityLog, Document, DocumentAccess, DocumentVersion
 
 User = get_user_model()
 
@@ -88,3 +88,55 @@ class AddMemberSerializer(serializers.Serializer):
 
 class ChangeRoleSerializer(serializers.Serializer):
     role = serializers.ChoiceField(choices=DocumentAccess.ROLE_CHOICES, error_messages=ROLE_ERRORS)
+
+
+class PersonSerializer(serializers.Serializer):
+    """A user as shown in the activity log / versions list (no email)."""
+
+    id = serializers.IntegerField(read_only=True)
+    display_name = serializers.CharField(read_only=True)
+    color = serializers.SerializerMethodField()
+
+    def get_color(self, user) -> str:
+        return presence_color(user)
+
+
+class ActivitySerializer(serializers.ModelSerializer):
+    actor = PersonSerializer(read_only=True, allow_null=True)
+
+    class Meta:
+        model = ActivityLog
+        fields = ["id", "action", "actor", "metadata", "created_at"]
+
+
+class VersionSerializer(serializers.ModelSerializer):
+    created_by = PersonSerializer(read_only=True, allow_null=True)
+    label = serializers.CharField(
+        max_length=DocumentVersion.LABEL_MAX_LENGTH,
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+        error_messages={"max_length": f"الاسم طويل جدًا ({DocumentVersion.LABEL_MAX_LENGTH} حرف كحد أقصى)."},
+    )
+
+    class Meta:
+        model = DocumentVersion
+        fields = ["id", "label", "kind", "created_by", "created_at"]
+        read_only_fields = ["id", "kind", "created_by", "created_at"]
+
+    def validate_label(self, value):
+        return " ".join(value.split())
+
+
+class VersionDetailSerializer(VersionSerializer):
+    """Includes the content (Yjs state, base64) so the browser can preview it."""
+
+    state = serializers.SerializerMethodField()
+
+    class Meta(VersionSerializer.Meta):
+        fields = VersionSerializer.Meta.fields + ["state"]
+
+    def get_state(self, version) -> str:
+        import base64
+
+        return base64.b64encode(bytes(version.yjs_state)).decode("ascii")

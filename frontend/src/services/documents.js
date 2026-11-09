@@ -21,6 +21,13 @@ export const documentsApi = {
   changeRole: (id, memberId, role) =>
     apiRequest(`${docUrl(id)}members/${memberId}/`, { method: "PATCH", body: { role } }),
   removeMember: (id, memberId) => apiRequest(`${docUrl(id)}members/${memberId}/`, { method: "DELETE" }),
+
+  // --- activity log & versions ---
+  activity: (id, page = 1) => apiRequest(`${docUrl(id)}activity/?page=${page}`),
+  versions: (id) => apiRequest(`${docUrl(id)}versions/`),
+  saveVersion: (id, label) => apiRequest(`${docUrl(id)}versions/`, { method: "POST", body: { label } }),
+  version: (id, versionId) => apiRequest(`${docUrl(id)}versions/${versionId}/`),
+  restoreVersion: (id, versionId) => apiRequest(`${docUrl(id)}versions/${versionId}/restore/`, { method: "POST" }),
 };
 
 export const TITLE_MAX_LENGTH = 200;

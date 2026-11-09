@@ -20,6 +20,7 @@ Security
 """
 import json
 import logging
+import time
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
@@ -27,6 +28,7 @@ from pycrdt import create_awareness_message, create_sync_message, create_update_
 
 from accounts.presence import presence_identity
 from documents.access import can_edit, get_document_and_role
+from documents.activity import log_edit
 
 from . import protocol
 from .rooms import rooms
@@ -40,11 +42,14 @@ CLOSE_ACCESS_CHANGED = 4409
 MAX_MESSAGE_BYTES = 5 * 1024 * 1024  # 5 MB
 # A browser tab normally uses ONE Yjs client id; allow a few for safety.
 MAX_CLIENT_IDS_PER_CONNECTION = 4
+# Write "X edited the document" to the activity log at most once a minute.
+EDIT_LOG_INTERVAL_SECONDS = 60
 
 
 class DocumentConsumer(AsyncWebsocketConsumer):
     room = None
     closing = False
+    edit_logged_at = float("-inf")
 
     async def connect(self):
         self.document_id = str(self.scope["url_route"]["kwargs"]["document_id"])
@@ -145,6 +150,17 @@ class DocumentConsumer(AsyncWebsocketConsumer):
             self.room.ydoc.apply_update(update)
             self.room.mark_dirty()
             await self.broadcast(create_update_message(update))
+            await self.log_edit_activity()
+
+    async def log_edit_activity(self):
+        now = time.monotonic()
+        if now - self.edit_logged_at < EDIT_LOG_INTERVAL_SECONDS:
+            return
+        self.edit_logged_at = now
+        try:
+            await database_sync_to_async(log_edit)(self.document_id, self.user)
+        except Exception:
+            logger.exception("Could not log edit activity on document %s", self.document_id)
 
     async def handle_awareness(self, message: bytes):
         payload, _ = protocol.read_var_bytes(message, 1)

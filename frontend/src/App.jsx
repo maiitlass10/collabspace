@@ -8,6 +8,7 @@ import LoginPage from "./pages/LoginPage.jsx";
 import NotFoundPage from "./pages/NotFoundPage.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
 import RegisterPage from "./pages/RegisterPage.jsx";
+import SettingsPage from "./pages/SettingsPage.jsx";
 import SystemStatusPage from "./pages/SystemStatusPage.jsx";
 
 export default function App() {
@@ -27,6 +28,7 @@ export default function App() {
           <Route index element={<DashboardPage />} />
           <Route path="/documents/:id" element={<DocumentPage />} />
           <Route path="/profile" element={<ProfilePage />} />
+          <Route path="/settings" element={<SettingsPage />} />
           <Route path="/status" element={<SystemStatusPage />} />
         </Route>
       </Route>

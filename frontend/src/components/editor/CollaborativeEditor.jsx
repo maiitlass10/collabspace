@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Collaboration from "@tiptap/extension-collaboration";
@@ -16,7 +17,7 @@ import EditorToolbar from "./EditorToolbar.jsx";
  * draws the other users' carets with their name and color. The server replaces
  * the name/color we send with the ones from our account (see consumers.py).
  */
-export default function CollaborativeEditor({ ydoc, provider, user, synced, readOnly = false }) {
+export default function CollaborativeEditor({ ydoc, provider, user, synced, readOnly = false, onReady }) {
   const editor = useEditor(
     {
       // Viewers cannot type. (The server ignores their edits anyway.)
@@ -41,6 +42,13 @@ export default function CollaborativeEditor({ ydoc, provider, user, synced, read
     },
     [ydoc, provider, readOnly]
   );
+
+  // Give the editor to the parent (used to restore an old version).
+  useEffect(() => {
+    if (!editor || !onReady) return undefined;
+    onReady(editor);
+    return () => onReady(null);
+  }, [editor, onReady]);
 
   if (!editor) return null;
 

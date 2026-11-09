@@ -500,3 +500,37 @@ class SharedEditingTests(TransactionTestCase):
         self.assertEqual(await database_sync_to_async(owner_removes_viewer)(), 204)
         await self.assert_closed_with(viewer, 4409)
         await viewer.ws.disconnect()
+
+
+class Sprint6CollaborationTests(TransactionTestCase):
+    def setUp(self):
+        rooms._rooms.clear()
+        self.owner = User.objects.create_user(email="o@example.com", password="x", display_name="Owner")
+        self.document = Document.objects.create(owner=self.owner, title="Doc")
+
+    async def test_editing_is_logged_once_per_interval(self):
+        from documents.models import ActivityLog
+
+        a = YClient(self.owner, self.document.id)
+        await a.connect()
+        await a.insert(0, "one")
+        await a.insert(0, "two")
+        await asyncio.sleep(0.1)
+        await a.ws.disconnect()
+        count = await database_sync_to_async(ActivityLog.objects.filter(action="edited").count)()
+        self.assertEqual(count, 1)
+
+    async def test_snapshot_includes_edits_not_yet_saved(self):
+        from documents.views import take_snapshot
+
+        rooms_module.SAVE_DELAY_SECONDS = 60  # the normal save would not happen yet
+        try:
+            a = YClient(self.owner, self.document.id)
+            await a.connect()
+            await a.insert(0, "fresh text")
+            await asyncio.sleep(0.05)
+            version = await database_sync_to_async(take_snapshot)(self.document, self.owner)
+            self.assertEqual(text_of(bytes(version.yjs_state)), "fresh text")
+            await a.ws.disconnect()
+        finally:
+            rooms_module.SAVE_DELAY_SECONDS = 2.0

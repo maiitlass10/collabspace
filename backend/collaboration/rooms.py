@@ -14,6 +14,7 @@ processes requires a shared store (see docs/deployment in Sprint 7).
 import asyncio
 import logging
 
+from asgiref.sync import async_to_sync
 from channels.db import database_sync_to_async
 from django.utils import timezone
 from pycrdt import Awareness, Doc
@@ -118,8 +119,23 @@ class RoomManager:
     def get(self, document_id: str) -> Room | None:
         return self._rooms.get(document_id)
 
+    async def flush_document(self, document_id: str) -> None:
+        """Save an open document now (if anyone is editing it)."""
+        room = self._rooms.get(str(document_id))
+        if room is not None:
+            await room.flush()
+
     def __len__(self):
         return len(self._rooms)
 
 
 rooms = RoomManager()
+
+
+def flush_open_document(document_id) -> None:
+    """
+    For synchronous code (REST views): make sure the database has the latest
+    content of a document that is open in the editor, e.g. before taking a
+    version snapshot. Runs on the server's event loop, where the rooms live.
+    """
+    async_to_sync(rooms.flush_document)(str(document_id))
