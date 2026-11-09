@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useLocation, useNavigate } from "react-router";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 import { useAuth } from "../context/AuthContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
 import Alert from "../components/ui/Alert.jsx";
@@ -16,6 +16,9 @@ export default function DashboardPage() {
   const toast = useToast();
   const navigate = useNavigate();
   const location = useLocation();
+  // ?tab=shared keeps the selected tab after a refresh or "back".
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = searchParams.get("tab") === "shared" ? "shared" : "owned";
 
   const [documents, setDocuments] = useState([]);
   const [count, setCount] = useState(0);
@@ -34,12 +37,12 @@ export default function DashboardPage() {
   // Ignore responses from outdated searches (user typed again meanwhile).
   const requestId = useRef(0);
 
-  const load = useCallback(async (searchTerm, page = 1) => {
+  const load = useCallback(async (searchTerm, scope, page = 1) => {
     const id = ++requestId.current;
     if (page === 1) setStatus("loading");
     else setLoadingMore(true);
     try {
-      const data = await documentsApi.list({ search: searchTerm, page });
+      const data = await documentsApi.list({ search: searchTerm, page, scope });
       if (id !== requestId.current) return;
       setDocuments((current) => (page === 1 ? data.results : [...current, ...data.results]));
       setCount(data.count);
@@ -59,8 +62,14 @@ export default function DashboardPage() {
   }, [toast]);
 
   useEffect(() => {
-    load(debouncedSearch);
-  }, [debouncedSearch, load]);
+    load(debouncedSearch, tab);
+  }, [debouncedSearch, tab, load]);
+
+  function selectTab(next) {
+    if (next === tab) return;
+    setSearch("");
+    setSearchParams(next === "shared" ? { tab: "shared" } : {});
+  }
 
   async function handleCreate(title) {
     const doc = await documentsApi.create(title);
@@ -85,6 +94,7 @@ export default function DashboardPage() {
   }
 
   const isSearching = debouncedSearch.trim().length > 0;
+  const isShared = tab === "shared";
 
   return (
     <div className="page-container">
@@ -92,15 +102,38 @@ export default function DashboardPage() {
         <div>
           <h1 className="page-title">أهلًا، {user.display_name} 👋</h1>
           <p className="muted">
-            {status === "ready" && !isSearching
-              ? count > 0
-                ? `لديك ${documentsCount(count)}.`
-                : "ابدأ بإنشاء مستندك الأول."
-              : "مستنداتك في مكان واحد."}
+            {isShared
+              ? "مستندات شاركها الآخرون معك."
+              : status === "ready" && !isSearching
+                ? count > 0
+                  ? `لديك ${documentsCount(count)}.`
+                  : "ابدأ بإنشاء مستندك الأول."
+                : "مستنداتك في مكان واحد."}
           </p>
         </div>
         <Button onClick={() => setCreating(true)}>＋ مستند جديد</Button>
       </header>
+
+      <div className="tabs" role="tablist" aria-label="نوع المستندات">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={!isShared}
+          className={`tab ${!isShared ? "tab--active" : ""}`}
+          onClick={() => selectTab("owned")}
+        >
+          مستنداتي
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={isShared}
+          className={`tab ${isShared ? "tab--active" : ""}`}
+          onClick={() => selectTab("shared")}
+        >
+          مشتركة معي
+        </button>
+      </div>
 
       {location.state?.welcome && (
         <Alert type="success">تم إنشاء حسابك وتسجيل دخولك بنجاح. مرحبًا بك في CollabSpace!</Alert>
@@ -134,13 +167,23 @@ export default function DashboardPage() {
           </div>
           <h2>تعذّر تحميل المستندات</h2>
           <p className="muted">{error}</p>
-          <Button variant="secondary" onClick={() => load(debouncedSearch)}>
+          <Button variant="secondary" onClick={() => load(debouncedSearch, tab)}>
             إعادة المحاولة
           </Button>
         </section>
       )}
 
-      {status === "ready" && documents.length === 0 && !isSearching && (
+      {status === "ready" && documents.length === 0 && !isSearching && isShared && (
+        <section className="empty-state">
+          <div className="empty-state-icon" aria-hidden="true">
+            🤝
+          </div>
+          <h2>لا توجد مستندات مشتركة معك بعد</h2>
+          <p className="muted">عندما يشارك أحد مستندًا معك عبر بريدك الإلكتروني، سيظهر هنا.</p>
+        </section>
+      )}
+
+      {status === "ready" && documents.length === 0 && !isSearching && !isShared && (
         <section className="empty-state">
           <div className="empty-state-icon" aria-hidden="true">
             📄
@@ -170,7 +213,7 @@ export default function DashboardPage() {
           </div>
           {nextPage && (
             <div className="text-center">
-              <Button variant="secondary" loading={loadingMore} onClick={() => load(debouncedSearch, nextPage)}>
+              <Button variant="secondary" loading={loadingMore} onClick={() => load(debouncedSearch, tab, nextPage)}>
                 عرض المزيد
               </Button>
             </div>

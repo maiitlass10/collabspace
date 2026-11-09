@@ -11,6 +11,9 @@ Security
 * We accept the socket and then close it with an application code, so the
   browser can show a clear message and stop reconnecting:
       4401 = not logged in, 4403 = no access / not found, 4413 = message too big
+      4409 = your access changed (role changed, removed, or document deleted):
+             the browser reconnects so the new role is checked from scratch
+* Viewers (read-only) receive the document but their edits are ignored.
 * Presence (awareness) is rewritten by the server: the `user` field (name,
   color) always comes from the logged-in account, and a connection may only
   update the Yjs client ids it owns.
@@ -33,6 +36,7 @@ logger = logging.getLogger(__name__)
 CLOSE_UNAUTHENTICATED = 4401
 CLOSE_FORBIDDEN = 4403
 CLOSE_TOO_LARGE = 4413
+CLOSE_ACCESS_CHANGED = 4409
 MAX_MESSAGE_BYTES = 5 * 1024 * 1024  # 5 MB
 # A browser tab normally uses ONE Yjs client id; allow a few for safety.
 MAX_CLIENT_IDS_PER_CONNECTION = 4
@@ -40,6 +44,7 @@ MAX_CLIENT_IDS_PER_CONNECTION = 4
 
 class DocumentConsumer(AsyncWebsocketConsumer):
     room = None
+    closing = False
 
     async def connect(self):
         self.document_id = str(self.scope["url_route"]["kwargs"]["document_id"])
@@ -96,7 +101,7 @@ class DocumentConsumer(AsyncWebsocketConsumer):
             await rooms.leave(room)
 
     async def receive(self, text_data=None, bytes_data=None):
-        if self.room is None or not bytes_data:
+        if self.room is None or self.closing or not bytes_data:
             return
         if len(bytes_data) > MAX_MESSAGE_BYTES:
             await self.close(code=CLOSE_TOO_LARGE)
@@ -183,6 +188,16 @@ class DocumentConsumer(AsyncWebsocketConsumer):
             return None
         state["user"] = self.presence
         return json.dumps(state, separators=(",", ":"))
+
+    async def access_changed(self, event):
+        """Sent by the REST API when sharing changes (documents/access.py)."""
+        if self.room is None or self.closing:
+            return
+        if event["user_id"] is None or event["user_id"] == self.user.id:
+            # Stop accepting anything with the old role, then ask the browser
+            # to reconnect: connect() checks the NEW role (or refuses).
+            self.closing = True
+            await self.close(code=CLOSE_ACCESS_CHANGED)
 
     # --- fan-out to the other users in the same document --------------------
     async def broadcast(self, data: bytes):

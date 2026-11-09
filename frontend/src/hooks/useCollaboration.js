@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import { wsUrl } from "../services/api.js";
@@ -9,6 +9,8 @@ const FATAL_CLOSE_CODES = {
   4403: "ليست لديك صلاحية الوصول إلى هذا المستند.",
   4413: "التعديل أكبر من الحجم المسموح.",
 };
+// The owner changed our role, removed us, or deleted the document.
+const ACCESS_CHANGED = 4409;
 
 /**
  * Connects a Yjs document to the server for one CollabSpace document.
@@ -18,12 +20,18 @@ const FATAL_CLOSE_CODES = {
  *   status:  "connecting" | "connected" | "disconnected"
  *   synced:  true once the initial content has been received
  *   fatalError: message when the server refused us (we stop reconnecting)
+ *
+ * onAccessChanged(): called when the server says our permissions changed;
+ * the page then reloads the document (new role) and reconnects.
  */
-export default function useCollaboration(documentId) {
+export default function useCollaboration(documentId, onAccessChanged) {
   const [session, setSession] = useState(null);
   const [status, setStatus] = useState("connecting");
   const [synced, setSynced] = useState(false);
   const [fatalError, setFatalError] = useState("");
+  // Keep the latest callback without reconnecting when it changes.
+  const onAccessChangedRef = useRef(onAccessChanged);
+  onAccessChangedRef.current = onAccessChanged;
 
   useEffect(() => {
     const ydoc = new Y.Doc();
@@ -46,6 +54,11 @@ export default function useCollaboration(documentId) {
       if (isSynced) setSynced(true);
     };
     const onClose = (event) => {
+      if (event?.code === ACCESS_CHANGED) {
+        provider.disconnect(); // the page decides what happens next
+        onAccessChangedRef.current?.();
+        return;
+      }
       const message = event && FATAL_CLOSE_CODES[event.code];
       if (message) {
         provider.disconnect(); // stop the automatic reconnect loop

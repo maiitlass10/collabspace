@@ -1,6 +1,12 @@
+from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from .models import DEFAULT_TITLE, TITLE_MAX_LENGTH, Document
+from accounts.presence import presence_color
+
+from .access import role_for
+from .models import DEFAULT_TITLE, TITLE_MAX_LENGTH, Document, DocumentAccess
+
+User = get_user_model()
 
 
 class OwnerSerializer(serializers.Serializer):
@@ -10,6 +16,8 @@ class OwnerSerializer(serializers.Serializer):
 
 class DocumentSerializer(serializers.ModelSerializer):
     owner = OwnerSerializer(read_only=True)
+    # My role on this document: "owner" | "editor" | "viewer".
+    role = serializers.SerializerMethodField()
     title = serializers.CharField(
         max_length=TITLE_MAX_LENGTH,
         required=False,
@@ -20,8 +28,11 @@ class DocumentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Document
-        fields = ["id", "title", "owner", "created_at", "updated_at"]
-        read_only_fields = ["id", "owner", "created_at", "updated_at"]
+        fields = ["id", "title", "owner", "role", "created_at", "updated_at"]
+        read_only_fields = ["id", "owner", "role", "created_at", "updated_at"]
+
+    def get_role(self, document):
+        return role_for(self.context["request"].user, document)
 
     def validate_title(self, value):
         # Collapse internal whitespace: "  my    doc " -> "my doc"
@@ -33,3 +44,47 @@ class DocumentSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError("العنوان لا يمكن أن يكون فارغًا.")
             return DEFAULT_TITLE
         return value
+
+
+class MemberUserSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    display_name = serializers.CharField(read_only=True)
+    email = serializers.EmailField(read_only=True)
+    color = serializers.SerializerMethodField()
+
+    def get_color(self, user) -> str:
+        return presence_color(user)
+
+
+class MemberSerializer(serializers.ModelSerializer):
+    """One person a document is shared with."""
+
+    user = MemberUserSerializer(read_only=True)
+
+    class Meta:
+        model = DocumentAccess
+        fields = ["id", "user", "role", "created_at"]
+        read_only_fields = ["id", "user", "created_at"]
+
+
+ROLE_ERRORS = {"invalid_choice": "الدور يجب أن يكون «محرِّر» أو «قارئ»."}
+
+
+class AddMemberSerializer(serializers.Serializer):
+    email = serializers.EmailField(error_messages={"invalid": "أدخل بريدًا إلكترونيًا صحيحًا."})
+    role = serializers.ChoiceField(choices=DocumentAccess.ROLE_CHOICES, error_messages=ROLE_ERRORS)
+
+    def validate_email(self, value):
+        document = self.context["document"]
+        user = User.objects.filter(email__iexact=value.strip(), is_active=True).first()
+        if user is None:
+            raise serializers.ValidationError("لا يوجد حساب بهذا البريد. اطلب من الشخص إنشاء حساب أولًا.")
+        if user.pk == document.owner_id:
+            raise serializers.ValidationError("أنت مالك هذا المستند بالفعل.")
+        if DocumentAccess.objects.filter(document=document, user=user).exists():
+            raise serializers.ValidationError("هذا الشخص لديه وصول إلى المستند بالفعل.")
+        return user  # validated_data["email"] is the User object
+
+
+class ChangeRoleSerializer(serializers.Serializer):
+    role = serializers.ChoiceField(choices=DocumentAccess.ROLE_CHOICES, error_messages=ROLE_ERRORS)

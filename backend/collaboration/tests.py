@@ -372,3 +372,131 @@ class PresenceColorTests(TransactionTestCase):
         self.assertEqual(presence_color(user), presence_color(user))
         for color in PRESENCE_COLORS:
             self.assertRegex(color, re.compile(r"^#[0-9a-f]{6}$"))
+
+
+class SharedEditingTests(TransactionTestCase):
+    """Sprint 5: roles are enforced on the WebSocket, and changes apply at once."""
+
+    def setUp(self):
+        from documents.models import DocumentAccess
+
+        rooms._rooms.clear()
+        rooms_module.SAVE_DELAY_SECONDS = 0.05
+        self.owner = User.objects.create_user(email="o@example.com", password="x", display_name="Owner")
+        self.viewer = User.objects.create_user(email="v@example.com", password="x", display_name="Viewer")
+        self.editor = User.objects.create_user(email="e@example.com", password="x", display_name="Editor")
+        self.document = Document.objects.create(owner=self.owner, title="Doc")
+        self.viewer_access = DocumentAccess.objects.create(document=self.document, user=self.viewer, role="viewer")
+        self.editor_access = DocumentAccess.objects.create(document=self.document, user=self.editor, role="editor")
+
+    def tearDown(self):
+        rooms_module.SAVE_DELAY_SECONDS = 2.0
+
+    async def test_editor_edits_reach_others_and_are_saved(self):
+        owner = YClient(self.owner, self.document.id)
+        editor = YClient(self.editor, self.document.id)
+        await owner.connect()
+        await editor.connect()
+        await editor.insert(0, "من المحرّر")
+        await owner.receive_update()
+        self.assertEqual(str(owner.text), "من المحرّر")
+        await owner.ws.disconnect()
+        await editor.ws.disconnect()
+        await database_sync_to_async(self.document.refresh_from_db)()
+        self.assertEqual(text_of(bytes(self.document.yjs_state)), "من المحرّر")
+
+    async def test_viewer_receives_content_but_cannot_change_it(self):
+        owner = YClient(self.owner, self.document.id)
+        viewer = YClient(self.viewer, self.document.id)
+        await owner.connect()
+        await viewer.connect()
+
+        await owner.insert(0, "original")
+        await viewer.receive_update()
+        self.assertEqual(str(viewer.text), "original", "viewers see live edits")
+
+        await viewer.insert(0, "HACK ")  # a tampered browser sends an edit anyway
+        self.assertTrue(await owner.ws.receive_nothing(timeout=0.2), "not broadcast")
+        room = rooms.get(str(self.document.id))
+        self.assertEqual(text_of(room.ydoc.get_update()), "original", "not applied on the server")
+        await owner.ws.disconnect()
+        await viewer.ws.disconnect()
+        await database_sync_to_async(self.document.refresh_from_db)()
+        self.assertEqual(text_of(bytes(self.document.yjs_state)), "original", "not saved")
+
+    async def assert_closed_with(self, client, code):
+        output = await client.ws.receive_output(timeout=2)
+        while output["type"] != "websocket.close":
+            output = await client.ws.receive_output(timeout=2)
+        self.assertEqual(output["code"], code)
+
+    async def test_removed_member_is_disconnected_immediately(self):
+        from documents.access import notify_access_changed
+
+        viewer = YClient(self.viewer, self.document.id)
+        editor = YClient(self.editor, self.document.id)
+        await viewer.connect()
+        await editor.connect()
+
+        await database_sync_to_async(self.viewer_access.delete)()
+        await database_sync_to_async(notify_access_changed)(self.document.id, self.viewer.id)
+        await self.assert_closed_with(viewer, 4409)
+        self.assertTrue(await editor.ws.receive_nothing(timeout=0.2), "others stay connected")
+        await viewer.ws.disconnect()
+
+        # Reconnecting is refused now.
+        headers = await database_sync_to_async(session_headers)(self.viewer)
+        ws = WebsocketCommunicator(application, f"/ws/documents/{self.document.id}/", headers=headers)
+        await ws.connect()
+        self.assertEqual((await ws.receive_output(timeout=2))["code"], 4403)
+        await editor.ws.disconnect()
+
+    async def test_role_change_forces_reconnect_with_new_role(self):
+        from documents.access import notify_access_changed
+
+        editor = YClient(self.editor, self.document.id)
+        await editor.connect()
+        self.editor_access.role = "viewer"
+        await database_sync_to_async(self.editor_access.save)()
+        await database_sync_to_async(notify_access_changed)(self.document.id, self.editor.id)
+        await self.assert_closed_with(editor, 4409)
+        await editor.ws.disconnect()
+
+        # After reconnecting, the former editor is now read-only.
+        again = YClient(self.editor, self.document.id)
+        await again.connect()
+        await again.insert(0, "should be ignored")
+        await asyncio.sleep(0.1)
+        room = rooms.get(str(self.document.id))
+        self.assertEqual(text_of(room.ydoc.get_update()), "")
+        await again.ws.disconnect()
+
+    async def test_deleting_the_document_disconnects_everyone(self):
+        from documents.access import notify_access_changed
+
+        owner = YClient(self.owner, self.document.id)
+        editor = YClient(self.editor, self.document.id)
+        await owner.connect()
+        await editor.connect()
+        await database_sync_to_async(notify_access_changed)(self.document.id)
+        await self.assert_closed_with(owner, 4409)
+        await self.assert_closed_with(editor, 4409)
+        await owner.ws.disconnect()
+        await editor.ws.disconnect()
+
+    async def test_removing_via_rest_api_disconnects_the_socket(self):
+        from django.urls import reverse
+        from rest_framework.test import APIClient
+
+        viewer = YClient(self.viewer, self.document.id)
+        await viewer.connect()
+
+        def owner_removes_viewer():
+            client = APIClient()
+            client.force_authenticate(self.owner)
+            url = reverse("document-member-detail", args=[self.document.id, self.viewer_access.pk])
+            return client.delete(url).status_code
+
+        self.assertEqual(await database_sync_to_async(owner_removes_viewer)(), 204)
+        await self.assert_closed_with(viewer, 4409)
+        await viewer.ws.disconnect()

@@ -122,6 +122,7 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "login": "10/min",
         "register": "20/hour",
+        "share": "60/hour",
     },
 }
 

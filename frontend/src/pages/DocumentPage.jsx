@@ -1,10 +1,11 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useToast } from "../context/ToastContext.jsx";
 import Button from "../components/ui/Button.jsx";
 import { FullPageLoader } from "../components/ui/Spinner.jsx";
 import ConfirmDeleteDialog from "../components/documents/ConfirmDeleteDialog.jsx";
-import { documentsApi, TITLE_MAX_LENGTH } from "../services/documents.js";
+import ShareDialog from "../components/documents/ShareDialog.jsx";
+import { canEdit, documentsApi, isOwner, ROLE_LABELS, TITLE_MAX_LENGTH } from "../services/documents.js";
 import { fullDate, timeAgo } from "../utils/date.js";
 import Spinner from "../components/ui/Spinner.jsx";
 
@@ -22,7 +23,15 @@ export default function DocumentPage() {
   const [title, setTitle] = useState("");
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved | error
   const [deleting, setDeleting] = useState(null);
+  const [sharing, setSharing] = useState(false);
+  // Changing this remounts the editor = a fresh WebSocket with the new role.
+  const [connectionKey, setConnectionKey] = useState(0);
   const titleInput = useRef(null);
+  // The role we had before the server told us it changed.
+  const roleRef = useRef(null);
+  useEffect(() => {
+    roleRef.current = doc?.role ?? null;
+  }, [doc]);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,7 +54,29 @@ export default function DocumentPage() {
     };
   }, [id]);
 
+  // The server closed our editor connection because our access changed.
+  const handleAccessChanged = useCallback(async () => {
+    try {
+      const data = await documentsApi.get(id);
+      if (roleRef.current && roleRef.current !== data.role) {
+        toast.success(`تغيّرت صلاحيتك: أصبحت ${ROLE_LABELS[data.role]}.`);
+      }
+      setDoc(data);
+      setTitle(data.title);
+      setConnectionKey((k) => k + 1);
+    } catch (err) {
+      if (err.status === 404) {
+        toast.error("لم يعد لديك وصول إلى هذا المستند.");
+        setStatus("notfound");
+      } else {
+        setError(err.message);
+        setStatus("error");
+      }
+    }
+  }, [id, toast]);
+
   async function saveTitle() {
+    if (!canEdit(doc.role)) return;
     const clean = title.trim().replace(/\s+/g, " ");
     if (clean === doc.title) {
       setTitle(doc.title);
@@ -103,10 +134,13 @@ export default function DocumentPage() {
     error: "لم يتم الحفظ",
   }[saveState];
 
+  const owner = isOwner(doc.role);
+  const editable = canEdit(doc.role);
+
   return (
     <div className="page-container">
       <nav className="breadcrumb" aria-label="مسار التنقل">
-        <Link to="/">مستنداتي</Link>
+        {owner ? <Link to="/">مستنداتي</Link> : <Link to="/?tab=shared">مشتركة معي</Link>}
         <span aria-hidden="true">‹</span>
         <span className="breadcrumb-current">{doc.title}</span>
       </nav>
@@ -117,6 +151,8 @@ export default function DocumentPage() {
           className="doc-title-input"
           aria-label="عنوان المستند"
           value={title}
+          readOnly={!editable}
+          title={editable ? undefined : "لا يمكنك تغيير العنوان"}
           maxLength={TITLE_MAX_LENGTH}
           onChange={(e) => {
             setTitle(e.target.value);
@@ -135,9 +171,19 @@ export default function DocumentPage() {
           <span className={`save-state save-state--${saveState}`} title={fullDate(doc.updated_at)}>
             {saveLabel}
           </span>
-          <Button variant="danger-outline" onClick={() => setDeleting(doc)}>
-            حذف
-          </Button>
+          {owner ? (
+            <>
+              <Button onClick={() => setSharing(true)}>مشاركة</Button>
+              <Button variant="danger-outline" onClick={() => setDeleting(doc)}>
+                حذف
+              </Button>
+            </>
+          ) : (
+            <span className="shared-by">
+              مشارك من <strong>{doc.owner.display_name}</strong>
+              <span className={`role-badge role-badge--${doc.role}`}>{ROLE_LABELS[doc.role]}</span>
+            </span>
+          )}
         </div>
       </header>
 
@@ -148,10 +194,16 @@ export default function DocumentPage() {
           </div>
         }
       >
-        <DocumentWorkspace documentId={doc.id} />
+        <DocumentWorkspace
+          key={`${doc.id}:${connectionKey}`}
+          documentId={doc.id}
+          readOnly={!editable}
+          onAccessChanged={handleAccessChanged}
+        />
       </Suspense>
 
       <ConfirmDeleteDialog doc={deleting} onConfirm={handleDelete} onClose={() => setDeleting(null)} />
+      {owner && <ShareDialog open={sharing} doc={doc} onClose={() => setSharing(false)} />}
     </div>
   );
 }

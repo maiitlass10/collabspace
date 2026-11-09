@@ -7,9 +7,9 @@ import ConnectionBadge from "./ConnectionBadge.jsx";
 import PresenceList from "./PresenceList.jsx";
 
 /** Mounted only after the REST API confirmed we may open this document. */
-export default function DocumentWorkspace({ documentId }) {
+export default function DocumentWorkspace({ documentId, readOnly = false, onAccessChanged }) {
   const { user } = useAuth();
-  const { ydoc, provider, status, synced, fatalError } = useCollaboration(documentId);
+  const { ydoc, provider, status, synced, fatalError } = useCollaboration(documentId, onAccessChanged);
   const users = usePresence(provider, user.id);
 
   if (fatalError) {
@@ -30,11 +30,21 @@ export default function DocumentWorkspace({ documentId }) {
   return (
     <>
       <div className="workspace-bar">
-        <ConnectionBadge status={status} />
+        <div className="workspace-status">
+          <ConnectionBadge status={status} />
+          {readOnly && <span className="readonly-badge">👁 للقراءة فقط</span>}
+        </div>
         {status === "connected" && <PresenceList users={users} />}
       </div>
       {ydoc && provider && (
-        <CollaborativeEditor key={documentId} ydoc={ydoc} provider={provider} user={user} synced={synced} />
+        <CollaborativeEditor
+          key={documentId}
+          ydoc={ydoc}
+          provider={provider}
+          user={user}
+          synced={synced}
+          readOnly={readOnly}
+        />
       )}
     </>
   );

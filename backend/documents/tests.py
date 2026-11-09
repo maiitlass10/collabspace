@@ -142,3 +142,193 @@ class DocumentCsrfTests(TestCase):
         response = client.post(reverse("document-list"), {"title": "x"}, format="json")
         self.assertEqual(response.status_code, 403)
         self.assertFalse(Document.objects.exists())
+
+
+# =============================================================================
+# Sprint 5: sharing and roles
+# =============================================================================
+from django.core.cache import cache  # noqa: E402
+
+from .access import ROLE_EDITOR, ROLE_OWNER, ROLE_VIEWER, get_document_and_role  # noqa: E402
+from .models import DocumentAccess  # noqa: E402
+
+
+class SharingTestBase(TestCase):
+    def setUp(self):
+        cache.clear()  # reset the "share" throttle
+        self.alice = User.objects.create_user(email="alice@example.com", password="x", display_name="Alice")
+        self.bob = User.objects.create_user(email="bob@example.com", password="x", display_name="Bob")
+        self.carol = User.objects.create_user(email="carol@example.com", password="x", display_name="Carol")
+        self.doc = Document.objects.create(owner=self.alice, title="خطة")
+        self.client = APIClient()
+        self.as_user(self.alice)
+
+    def as_user(self, user):
+        self.client.force_authenticate(user)
+
+    def share(self, user, role):
+        return DocumentAccess.objects.create(document=self.doc, user=user, role=role, invited_by=self.alice)
+
+    def detail_url(self, doc=None):
+        return reverse("document-detail", args=[(doc or self.doc).id])
+
+    def members_url(self, doc=None):
+        return reverse("document-members", args=[(doc or self.doc).id])
+
+    def member_url(self, access):
+        return reverse("document-member-detail", args=[access.document_id, access.pk])
+
+
+class RoleTests(SharingTestBase):
+    def test_roles(self):
+        self.share(self.bob, ROLE_VIEWER)
+        self.assertEqual(get_document_and_role(self.alice, self.doc.id)[1], ROLE_OWNER)
+        self.assertEqual(get_document_and_role(self.bob, self.doc.id)[1], ROLE_VIEWER)
+        self.assertEqual(get_document_and_role(self.carol, self.doc.id), (None, None))
+
+    def test_one_access_per_user_and_document(self):
+        from django.db import IntegrityError
+
+        self.share(self.bob, ROLE_VIEWER)
+        with self.assertRaises(IntegrityError):
+            self.share(self.bob, ROLE_EDITOR)
+
+
+class SharedDocumentApiTests(SharingTestBase):
+    def test_shared_document_appears_in_lists_with_role(self):
+        self.share(self.bob, ROLE_EDITOR)
+        Document.objects.create(owner=self.bob, title="لبوب")
+        self.as_user(self.bob)
+
+        everything = self.client.get(reverse("document-list")).json()
+        self.assertEqual(everything["count"], 2)
+
+        shared = self.client.get(reverse("document-list"), {"scope": "shared"}).json()
+        self.assertEqual([d["title"] for d in shared["results"]], ["خطة"])
+        self.assertEqual(shared["results"][0]["role"], ROLE_EDITOR)
+        self.assertEqual(shared["results"][0]["owner"]["display_name"], "Alice")
+
+        owned = self.client.get(reverse("document-list"), {"scope": "owned"}).json()
+        self.assertEqual([d["title"] for d in owned["results"]], ["لبوب"])
+        self.assertEqual(owned["results"][0]["role"], ROLE_OWNER)
+
+    def test_no_duplicates_when_owner_shared_with_many(self):
+        self.share(self.bob, ROLE_VIEWER)
+        self.share(self.carol, ROLE_VIEWER)
+        self.assertEqual(self.client.get(reverse("document-list")).json()["count"], 1)
+
+    def test_viewer_can_read_but_not_rename_or_delete(self):
+        self.share(self.bob, ROLE_VIEWER)
+        self.as_user(self.bob)
+        response = self.client.get(self.detail_url())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["role"], ROLE_VIEWER)
+        self.assertEqual(self.client.patch(self.detail_url(), {"title": "x"}, format="json").status_code, 403)
+        self.assertEqual(self.client.delete(self.detail_url()).status_code, 403)
+        self.doc.refresh_from_db()
+        self.assertEqual(self.doc.title, "خطة")
+
+    def test_editor_can_rename_but_not_delete(self):
+        self.share(self.bob, ROLE_EDITOR)
+        self.as_user(self.bob)
+        self.assertEqual(self.client.patch(self.detail_url(), {"title": "جديد"}, format="json").status_code, 200)
+        self.assertEqual(self.client.delete(self.detail_url()).status_code, 403)
+        self.assertTrue(Document.objects.filter(pk=self.doc.pk).exists())
+
+    def test_stranger_still_gets_404(self):
+        self.as_user(self.carol)
+        self.assertEqual(self.client.get(self.detail_url()).status_code, 404)
+        self.assertEqual(self.client.get(self.members_url()).status_code, 404)
+
+
+class MembersApiTests(SharingTestBase):
+    def test_owner_shares_by_email(self):
+        response = self.client.post(self.members_url(), {"email": " BOB@Example.com ", "role": "editor"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertEqual(body["user"]["display_name"], "Bob")
+        self.assertEqual(body["role"], "editor")
+        self.assertRegex(body["user"]["color"], r"^#[0-9a-f]{6}$")
+        access = DocumentAccess.objects.get(document=self.doc, user=self.bob)
+        self.assertEqual(access.invited_by, self.alice)
+
+    def test_list_members(self):
+        self.share(self.bob, ROLE_VIEWER)
+        body = self.client.get(self.members_url()).json()
+        self.assertEqual(body["owner"]["display_name"], "Alice")
+        self.assertEqual([(m["user"]["email"], m["role"]) for m in body["members"]], [("bob@example.com", "viewer")])
+
+    def test_share_errors(self):
+        cases = [
+            ({"email": "nobody@example.com", "role": "viewer"}, "email"),
+            ({"email": "alice@example.com", "role": "viewer"}, "email"),
+            ({"email": "not-an-email", "role": "viewer"}, "email"),
+            ({"email": "bob@example.com", "role": "owner"}, "role"),
+            ({"email": "bob@example.com"}, "role"),
+        ]
+        for data, field in cases:
+            with self.subTest(data=data):
+                response = self.client.post(self.members_url(), data, format="json")
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(field, response.json())
+        self.assertFalse(DocumentAccess.objects.exists())
+
+    def test_cannot_share_twice(self):
+        self.share(self.bob, ROLE_VIEWER)
+        response = self.client.post(self.members_url(), {"email": "bob@example.com", "role": "editor"}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_inactive_user_cannot_be_invited(self):
+        self.bob.is_active = False
+        self.bob.save()
+        response = self.client.post(self.members_url(), {"email": "bob@example.com", "role": "viewer"}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_only_owner_manages_sharing(self):
+        bob_access = self.share(self.bob, ROLE_EDITOR)
+        carol_access = self.share(self.carol, ROLE_VIEWER)
+        self.as_user(self.bob)  # an editor, not the owner
+        self.assertEqual(self.client.get(self.members_url()).status_code, 403)
+        response = self.client.post(self.members_url(), {"email": "x@example.com", "role": "viewer"}, format="json")
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.client.patch(self.member_url(bob_access), {"role": "editor"}, format="json").status_code, 403)
+        self.assertEqual(self.client.delete(self.member_url(carol_access)).status_code, 403)
+        self.assertEqual(DocumentAccess.objects.count(), 2)
+
+    def test_owner_changes_role_and_removes_member(self):
+        access = self.share(self.bob, ROLE_VIEWER)
+        response = self.client.patch(self.member_url(access), {"role": "editor"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        access.refresh_from_db()
+        self.assertEqual(access.role, ROLE_EDITOR)
+
+        self.assertEqual(self.client.delete(self.member_url(access)).status_code, 204)
+        self.as_user(self.bob)
+        self.assertEqual(self.client.get(self.detail_url()).status_code, 404, "access is really gone")
+
+    def test_member_can_leave(self):
+        access = self.share(self.bob, ROLE_VIEWER)
+        self.as_user(self.bob)
+        self.assertEqual(self.client.delete(self.member_url(access)).status_code, 204)
+        self.assertFalse(DocumentAccess.objects.exists())
+
+    def test_member_of_another_document_is_404(self):
+        other = Document.objects.create(owner=self.alice, title="آخر")
+        access = DocumentAccess.objects.create(document=other, user=self.bob, role=ROLE_VIEWER)
+        url = reverse("document-member-detail", args=[self.doc.id, access.pk])  # wrong document
+        self.assertEqual(self.client.delete(url).status_code, 404)
+        self.assertTrue(DocumentAccess.objects.filter(pk=access.pk).exists())
+
+    def test_deleting_document_deletes_accesses(self):
+        self.share(self.bob, ROLE_VIEWER)
+        self.assertEqual(self.client.delete(self.detail_url()).status_code, 204)
+        self.assertFalse(DocumentAccess.objects.exists())
+
+    def test_inviting_is_rate_limited(self):
+        from rest_framework.settings import api_settings
+
+        limit = int(api_settings.DEFAULT_THROTTLE_RATES["share"].split("/")[0])
+        for _ in range(limit):
+            self.client.post(self.members_url(), {"email": "nobody@example.com", "role": "viewer"}, format="json")
+        response = self.client.post(self.members_url(), {"email": "bob@example.com", "role": "viewer"}, format="json")
+        self.assertEqual(response.status_code, 429)

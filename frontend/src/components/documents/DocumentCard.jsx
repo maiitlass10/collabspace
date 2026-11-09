@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
+import { canEdit, isOwner, ROLE_LABELS } from "../../services/documents.js";
 import { fullDate, timeAgo } from "../../utils/date.js";
 
 export default function DocumentCard({ doc, onRename, onDelete }) {
+  const owner = isOwner(doc.role);
+  const mayRename = canEdit(doc.role);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef(null);
 
@@ -37,46 +40,56 @@ export default function DocumentCard({ doc, onRename, onDelete }) {
         <p className="doc-card-meta" title={fullDate(doc.updated_at)}>
           آخر تعديل {timeAgo(doc.updated_at)}
         </p>
+        {!owner && (
+          <p className="doc-card-shared">
+            <span>من {doc.owner.display_name}</span>
+            <span className={`role-badge role-badge--${doc.role}`}>{ROLE_LABELS[doc.role]}</span>
+          </p>
+        )}
       </Link>
 
-      <div className="doc-card-menu" ref={menuRef}>
-        <button
-          type="button"
-          className="icon-btn"
-          aria-label={`خيارات المستند ${doc.title}`}
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-          onClick={() => setMenuOpen((open) => !open)}
-        >
-          ⋮
-        </button>
-        {menuOpen && (
-          <div className="dropdown" role="menu">
-            <button
-              type="button"
-              role="menuitem"
-              className="dropdown-item"
-              onClick={() => {
-                setMenuOpen(false);
-                onRename(doc);
-              }}
-            >
-              إعادة تسمية
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              className="dropdown-item dropdown-item--danger"
-              onClick={() => {
-                setMenuOpen(false);
-                onDelete(doc);
-              }}
-            >
-              حذف
-            </button>
-          </div>
-        )}
-      </div>
+      {mayRename && (
+        <div className="doc-card-menu" ref={menuRef}>
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label={`خيارات المستند ${doc.title}`}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((open) => !open)}
+          >
+            ⋮
+          </button>
+          {menuOpen && (
+            <div className="dropdown" role="menu">
+              <button
+                type="button"
+                role="menuitem"
+                className="dropdown-item"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onRename(doc);
+                }}
+              >
+                إعادة تسمية
+              </button>
+              {owner && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="dropdown-item dropdown-item--danger"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onDelete(doc);
+                  }}
+                >
+                  حذف
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </article>
   );
 }

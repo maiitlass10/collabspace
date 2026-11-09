@@ -16,9 +16,11 @@ import EditorToolbar from "./EditorToolbar.jsx";
  * draws the other users' carets with their name and color. The server replaces
  * the name/color we send with the ones from our account (see consumers.py).
  */
-export default function CollaborativeEditor({ ydoc, provider, user, synced }) {
+export default function CollaborativeEditor({ ydoc, provider, user, synced, readOnly = false }) {
   const editor = useEditor(
     {
+      // Viewers cannot type. (The server ignores their edits anyway.)
+      editable: !readOnly,
       extensions: [
         // Yjs has its own collaborative undo/redo, so disable the default one.
         StarterKit.configure({ undoRedo: false }),
@@ -28,7 +30,7 @@ export default function CollaborativeEditor({ ydoc, provider, user, synced }) {
           user: { id: user.id, name: user.display_name, color: user.color },
         }),
         TextAlign.configure({ types: ["heading", "paragraph"] }),
-        Placeholder.configure({ placeholder: "ابدأ الكتابة هنا…" }),
+        Placeholder.configure({ placeholder: readOnly ? "المستند فارغ." : "ابدأ الكتابة هنا…" }),
       ],
       editorProps: {
         attributes: { class: "editor-content", "aria-label": "محتوى المستند" },
@@ -37,14 +39,14 @@ export default function CollaborativeEditor({ ydoc, provider, user, synced }) {
         scrollMargin: { top: 140, bottom: 60, left: 0, right: 0 },
       },
     },
-    [ydoc, provider]
+    [ydoc, provider, readOnly]
   );
 
   if (!editor) return null;
 
   return (
     <div className="editor-shell">
-      <EditorToolbar editor={editor} />
+      {!readOnly && <EditorToolbar editor={editor} />}
       <div className="editor-paper">
         {!synced && (
           <div className="editor-loading">
