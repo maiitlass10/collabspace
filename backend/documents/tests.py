@@ -490,3 +490,15 @@ class VersionTests(SharingTestBase):
         # Directly: 404 as well.
         url = reverse("document-version-detail", args=[other.id, secret.pk])
         self.assertEqual(self.client.get(url).status_code, 404)
+
+
+class SnapshotRequestValidationTests(SharingTestBase):
+    def test_invalid_browser_state_is_rejected(self):
+        self.doc.yjs_state = yjs_state_with("x")
+        self.doc.save()
+        url = reverse("document-versions", args=[self.doc.id])
+        for bad in ["%%%", base64.b64encode(b"not yjs at all").decode()]:
+            with self.subTest(bad=bad):
+                self.assertEqual(self.client.post(url, {"browser_state": bad}, format="json").status_code, 400)
+        ok = base64.b64encode(yjs_state_with("x")).decode()
+        self.assertEqual(self.client.post(url, {"browser_state": ok}, format="json").status_code, 201)

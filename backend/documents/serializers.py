@@ -31,7 +31,7 @@ class DocumentSerializer(serializers.ModelSerializer):
         fields = ["id", "title", "owner", "role", "created_at", "updated_at"]
         read_only_fields = ["id", "owner", "role", "created_at", "updated_at"]
 
-    def get_role(self, document):
+    def get_role(self, document) -> str | None:
         return role_for(self.context["request"].user, document)
 
     def validate_title(self, value):
@@ -109,8 +109,40 @@ class ActivitySerializer(serializers.ModelSerializer):
         fields = ["id", "action", "actor", "metadata", "created_at"]
 
 
+# Django refuses request bodies over 2.5 MB; base64 adds a third.
+MAX_BROWSER_STATE_CHARS = 2_000_000
+
+
+class YjsStateField(serializers.CharField):
+    """A full Yjs state sent by the browser (base64) -> bytes, validated."""
+
+    def to_internal_value(self, data):
+        import base64
+        import binascii
+
+        from pycrdt import Doc
+
+        value = super().to_internal_value(data)
+        try:
+            state = base64.b64decode(value, validate=True)
+            Doc().apply_update(state)  # rejects anything that is not a Yjs update
+        except (binascii.Error, ValueError, RuntimeError, Exception):
+            raise serializers.ValidationError("حالة المستند المرسلة غير صالحة.")
+        return state
+
+
+class SnapshotRequestSerializer(serializers.Serializer):
+    """
+    Optional: the browser's current Yjs state, so the snapshot includes
+    keystrokes that have not reached the server yet.
+    """
+
+    browser_state = YjsStateField(required=False, write_only=True, max_length=MAX_BROWSER_STATE_CHARS)
+
+
 class VersionSerializer(serializers.ModelSerializer):
     created_by = PersonSerializer(read_only=True, allow_null=True)
+    browser_state = YjsStateField(required=False, write_only=True, max_length=MAX_BROWSER_STATE_CHARS)
     label = serializers.CharField(
         max_length=DocumentVersion.LABEL_MAX_LENGTH,
         required=False,
@@ -121,7 +153,7 @@ class VersionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DocumentVersion
-        fields = ["id", "label", "kind", "created_by", "created_at"]
+        fields = ["id", "label", "kind", "created_by", "created_at", "browser_state"]
         read_only_fields = ["id", "kind", "created_by", "created_at"]
 
     def validate_label(self, value):

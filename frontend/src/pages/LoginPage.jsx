@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 import { useAuth } from "../context/AuthContext.jsx";
+import { redirectTarget } from "../components/ProtectedRoute.jsx";
 import Alert from "../components/ui/Alert.jsx";
 import Button from "../components/ui/Button.jsx";
 import TextField from "../components/ui/TextField.jsx";
@@ -34,7 +35,7 @@ export default function LoginPage() {
     setSubmitting(true);
     try {
       await login(form.email.trim(), form.password);
-      navigate(location.state?.from || "/", { replace: true });
+      navigate(redirectTarget(location), { replace: true });
     } catch (error) {
       setErrors(error.fieldErrors || {});
       setFormError(error.message);

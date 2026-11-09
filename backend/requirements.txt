@@ -15,6 +15,23 @@ cbor2==6.2.0.post2
 ujson==6.0.0
 msgpack==1.2.4
 
+# API documentation (OpenAPI schema + Swagger UI at /api/docs/)
+drf-spectacular==0.30.0
+# ...its pinned sub-dependencies
+PyYAML==6.0.3
+inflection==0.5.1
+uritemplate==4.2.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.9.1
+attrs==26.1.0
+
+# Production: Redis channel layer (optional, via REDIS_URL) and static files
+channels-redis==4.3.0
+redis==8.1.0
+whitenoise==6.12.0
+
 # Real-time collaboration (Yjs CRDT for Python)
 pycrdt==0.14.10
 anyio==4.16.0

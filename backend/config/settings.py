@@ -8,12 +8,18 @@ from pathlib import Path
 
 import environ
 
+from .channel_layers import channel_layers
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 env = environ.Env(
     DJANGO_DEBUG=(bool, False),
     DJANGO_ALLOWED_HOSTS=(list, ["localhost", "127.0.0.1"]),
     FRONTEND_ORIGIN=(str, "http://localhost:5173"),
+    # Production (HTTPS): send cookies only over HTTPS.
+    DJANGO_SECURE_COOKIES=(bool, False),
+    # Set when Django runs behind a proxy that terminates HTTPS (nginx, a PaaS).
+    DJANGO_BEHIND_HTTPS_PROXY=(bool, False),
 )
 environ.Env.read_env(BASE_DIR / ".env")
 
@@ -32,6 +38,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     # Third party
     "rest_framework",
+    "drf_spectacular",
     "channels",
     # Local apps
     "core",
@@ -52,6 +59,12 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
+
+# Production only: WhiteNoise serves the admin's CSS/JS from STATIC_ROOT
+# (filled by `collectstatic` in the Docker image). In development `runserver`
+# serves them itself, and STATIC_ROOT does not exist.
+if not DEBUG:
+    MIDDLEWARE.insert(1, "whitenoise.middleware.WhiteNoiseMiddleware")
 
 ROOT_URLCONF = "config.urls"
 
@@ -78,11 +91,14 @@ DATABASES = {
     "default": env.db("DATABASE_URL", default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}"),
 }
 
-# Channel layer: in-memory is fine for a single dev process.
-# In production we will switch to Redis (channels-redis).
-CHANNEL_LAYERS = {
-    "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
-}
+# Channel layer: how consumers talk to each other ("tell everyone in this
+# document..."). In-memory works inside ONE process; with REDIS_URL set,
+# Redis carries the messages, so REST views and WebSockets running in
+# different processes can still reach each other.
+# NOTE: the live Yjs rooms themselves stay in the memory of one process
+# (see collaboration/rooms.py and docs/DEPLOYMENT.md).
+REDIS_URL = env("REDIS_URL", default="")
+CHANNEL_LAYERS = channel_layers(REDIS_URL)
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -101,12 +117,17 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},
+}
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # The React dev server proxies /api and /ws to Django, so the browser sees a
 # single origin. We still trust the frontend origin explicitly for CSRF.
-CSRF_TRUSTED_ORIGINS = [env("FRONTEND_ORIGIN")]
+# Several origins can be given, separated by commas.
+CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[env("FRONTEND_ORIGIN")])
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
@@ -118,6 +139,7 @@ REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": [
         "rest_framework.renderers.JSONRenderer",
     ],
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     # Brute-force protection for the auth endpoints.
     "DEFAULT_THROTTLE_RATES": {
         "login": "10/min",
@@ -133,6 +155,27 @@ SESSION_COOKIE_SAMESITE = "Lax"
 SESSION_COOKIE_AGE = 60 * 60 * 24 * 14  # 2 weeks
 CSRF_COOKIE_HTTPONLY = False  # React must read it to send the X-CSRFToken header.
 CSRF_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_SECURE = env("DJANGO_SECURE_COOKIES")
+CSRF_COOKIE_SECURE = env("DJANGO_SECURE_COOKIES")
+if env("DJANGO_BEHIND_HTTPS_PROXY"):
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+# Interactive API documentation: /api/docs/ (Swagger UI), /api/schema/ (OpenAPI).
+SPECTACULAR_SETTINGS = {
+    "TITLE": "CollabSpace API",
+    "DESCRIPTION": (
+        "REST API of CollabSpace, a real-time collaborative document editor.\n\n"
+        "Authentication uses Django sessions: log in with `POST /api/auth/login/`, "
+        "then send the `X-CSRFToken` header (value of the `csrftoken` cookie) on "
+        "every write request. Real-time editing happens over the WebSocket "
+        "`/ws/documents/<uuid>/` (Yjs protocol), which is not part of this schema."
+    ),
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "COMPONENT_SPLIT_REQUEST": True,
+    "SCHEMA_PATH_PREFIX": r"/api/",
+}
+
 if DEBUG:
     REST_FRAMEWORK["DEFAULT_RENDERER_CLASSES"].append(
         "rest_framework.renderers.BrowsableAPIRenderer"
@@ -144,5 +187,6 @@ LOGGING = {
     "handlers": {"console": {"class": "logging.StreamHandler"}},
     "loggers": {
         "collaboration": {"handlers": ["console"], "level": "INFO"},
+        "django.request": {"handlers": ["console"], "level": "ERROR"},
     },
 }

@@ -1,4 +1,6 @@
 from django.shortcuts import get_object_or_404
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view, inline_serializer
+from rest_framework import serializers
 from rest_framework import mixins, status, viewsets
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
@@ -20,6 +22,7 @@ from .serializers import (
     DocumentSerializer,
     MemberSerializer,
     MemberUserSerializer,
+    SnapshotRequestSerializer,
     VersionDetailSerializer,
     VersionSerializer,
 )
@@ -31,6 +34,14 @@ class DocumentPagination(PageNumberPagination):
     max_page_size = 50
 
 
+@extend_schema_view(
+    list=extend_schema(
+        parameters=[
+            OpenApiParameter("scope", str, enum=["owned", "shared"], description="owned = mine, shared = shared with me"),
+            OpenApiParameter("search", str, description="Search in titles"),
+        ]
+    )
+)
 class DocumentViewSet(
     mixins.ListModelMixin,
     mixins.CreateModelMixin,
@@ -57,6 +68,8 @@ class DocumentViewSet(
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
 
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):  # building the API docs
+            return Document.objects.none()
         user = self.request.user
         queryset = accessible_documents(user)
         scope = self.request.query_params.get("scope", "")
@@ -106,11 +119,15 @@ class DocumentMembersView(DocumentMembersMixin, APIView):
     """
 
     throttle_scope = "share"
+    members_response = inline_serializer(
+        "DocumentMembers", {"owner": MemberUserSerializer(), "members": MemberSerializer(many=True)}
+    )
 
     def get_throttles(self):
         # Limit invitations (each one reveals whether an email is registered).
         return [ScopedRateThrottle()] if self.request.method == "POST" else []
 
+    @extend_schema(responses=members_response)
     def get(self, request, document_pk):
         document = self.get_document(document_pk)
         self.require_manager()
@@ -122,6 +139,7 @@ class DocumentMembersView(DocumentMembersMixin, APIView):
             }
         )
 
+    @extend_schema(request=AddMemberSerializer, responses={201: MemberSerializer})
     def post(self, request, document_pk):
         document = self.get_document(document_pk)
         self.require_manager()
@@ -147,6 +165,7 @@ class DocumentMemberDetailView(DocumentMembersMixin, APIView):
         document = self.get_document(document_pk)
         return get_object_or_404(DocumentAccess.objects.select_related("user"), pk=member_pk, document=document)
 
+    @extend_schema(request=ChangeRoleSerializer, responses=MemberSerializer)
     def patch(self, request, document_pk, member_pk):
         access = self.get_access(document_pk, member_pk)
         self.require_manager()
@@ -165,6 +184,7 @@ class DocumentMemberDetailView(DocumentMembersMixin, APIView):
             notify_access_changed(access.document_id, access.user_id)
         return Response(MemberSerializer(access).data)
 
+    @extend_schema(responses={204: None})
     def delete(self, request, document_pk, member_pk):
         access = self.get_access(document_pk, member_pk)
         leaving = access.user_id == request.user.id
@@ -190,6 +210,18 @@ class ActivityPagination(PageNumberPagination):
 class DocumentActivityView(DocumentMembersMixin, APIView):
     """GET /api/documents/<id>/activity/   newest first, ?page=   (any role)"""
 
+    @extend_schema(
+        parameters=[OpenApiParameter("page", int)],
+        responses=inline_serializer(
+            "PaginatedActivity",
+            {
+                "count": serializers.IntegerField(),
+                "next": serializers.URLField(allow_null=True),
+                "previous": serializers.URLField(allow_null=True),
+                "results": ActivitySerializer(many=True),
+            },
+        ),
+    )
     def get(self, request, document_pk):
         document = self.get_document(document_pk)
         queryset = document.activity.select_related("actor")
@@ -198,9 +230,13 @@ class DocumentActivityView(DocumentMembersMixin, APIView):
         return paginator.get_paginated_response(ActivitySerializer(page, many=True).data)
 
 
-def take_snapshot(document, user, label="", kind=DocumentVersion.KIND_MANUAL):
-    """Save the CURRENT content (including edits not yet written to the DB)."""
-    flush_open_document(document.pk)
+def take_snapshot(document, user, label="", kind=DocumentVersion.KIND_MANUAL, browser_state=None):
+    """
+    Save the CURRENT content: edits not yet written to the database, and (with
+    browser_state) the requester's keystrokes still on their way. Only call it
+    for users who may edit: browser_state is merged into the live document.
+    """
+    flush_open_document(document.pk, browser_state)
     state = Document.objects.filter(pk=document.pk).values_list("yjs_state", flat=True).first()
     if not state:
         raise ValidationError({"detail": "المستند فارغ، لا يوجد ما يمكن حفظه."})
@@ -215,18 +251,25 @@ class DocumentVersionsView(DocumentMembersMixin, APIView):
     POST /api/documents/<id>/versions/   save a snapshot {label?} (owner, editor)
     """
 
+    @extend_schema(responses=VersionSerializer(many=True), operation_id="documents_versions_list")
     def get(self, request, document_pk):
         document = self.get_document(document_pk)
         versions = document.versions.select_related("created_by")[:100]
         return Response(VersionSerializer(versions, many=True).data)
 
+    @extend_schema(request=VersionSerializer, responses={201: VersionSerializer})
     def post(self, request, document_pk):
         document = self.get_document(document_pk)
         if not can_edit(self.role):
             raise PermissionDenied("القارئ لا يمكنه حفظ الإصدارات.")
         serializer = VersionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        version = take_snapshot(document, request.user, label=serializer.validated_data.get("label", ""))
+        version = take_snapshot(
+            document,
+            request.user,
+            label=serializer.validated_data.get("label", ""),
+            browser_state=serializer.validated_data.get("browser_state"),
+        )
         log_activity(document, request.user, ActivityLog.VERSION_SAVED, version_id=version.pk, label=version.label)
         return Response(VersionSerializer(version).data, status=status.HTTP_201_CREATED)
 
@@ -234,6 +277,7 @@ class DocumentVersionsView(DocumentMembersMixin, APIView):
 class DocumentVersionDetailView(DocumentMembersMixin, APIView):
     """GET /api/documents/<id>/versions/<version_id>/   with content (any role)"""
 
+    @extend_schema(responses=VersionDetailSerializer)
     def get(self, request, document_pk, version_pk):
         document = self.get_document(document_pk)
         version = get_object_or_404(document.versions.select_related("created_by"), pk=version_pk)
@@ -250,15 +294,27 @@ class DocumentVersionRestoreView(DocumentMembersMixin, APIView):
     through the normal real-time path, so everyone sees it and it is saved.
     """
 
+    @extend_schema(
+        request=SnapshotRequestSerializer,
+        responses=inline_serializer(
+            "VersionRestore", {"version": VersionDetailSerializer(), "backup": VersionSerializer(allow_null=True)}
+        ),
+    )
     def post(self, request, document_pk, version_pk):
         document = self.get_document(document_pk)
         if not can_edit(self.role):
             raise PermissionDenied("القارئ لا يمكنه استرجاع الإصدارات.")
         version = get_object_or_404(document.versions, pk=version_pk)
+        body = SnapshotRequestSerializer(data=request.data)
+        body.is_valid(raise_exception=True)
         label = version.label or f"{version.created_at:%Y-%m-%d %H:%M}"
         try:
             backup = take_snapshot(
-                document, request.user, label=f"قبل استرجاع «{label}»"[:100], kind=DocumentVersion.KIND_BACKUP
+                document,
+                request.user,
+                label=f"قبل استرجاع «{label}»"[:100],
+                kind=DocumentVersion.KIND_BACKUP,
+                browser_state=body.validated_data.get("browser_state"),
             )
         except ValidationError:
             backup = None  # the document was empty: nothing to back up

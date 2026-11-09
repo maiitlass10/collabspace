@@ -21,6 +21,10 @@ from pycrdt import Awareness, Doc
 
 from documents.models import Document
 
+from . import protocol
+
+from . import protocol
+
 logger = logging.getLogger(__name__)
 
 SAVE_DELAY_SECONDS = 2.0
@@ -88,6 +92,17 @@ def save_document_state(document_id: str, state: bytes) -> None:
     Document.objects.filter(pk=document_id).update(yjs_state=state, updated_at=timezone.now())
 
 
+async def broadcast_update(document_id: str, update: bytes) -> None:
+    """Send a Yjs update to everyone connected to the document."""
+    from channels.layers import get_channel_layer
+    from pycrdt import create_update_message
+
+    await get_channel_layer().group_send(
+        f"document_{document_id}",
+        {"type": "yjs.message", "data": create_update_message(update), "sender": "server"},
+    )
+
+
 class RoomManager:
     def __init__(self):
         self._rooms: dict[str, Room] = {}
@@ -119,11 +134,27 @@ class RoomManager:
     def get(self, document_id: str) -> Room | None:
         return self._rooms.get(document_id)
 
-    async def flush_document(self, document_id: str) -> None:
-        """Save an open document now (if anyone is editing it)."""
+    async def flush_document(self, document_id: str, browser_state: bytes | None = None) -> None:
+        """
+        Save an open document now (if anyone is editing it).
+
+        browser_state: the full Yjs state of the browser asking for a snapshot.
+        Its last keystrokes may still be "in flight" on the WebSocket (and the
+        consumer cannot process them while this HTTP request is running), so we
+        merge them in first. Yjs merging is idempotent: when the WebSocket
+        messages arrive later, they change nothing.
+        """
         room = self._rooms.get(str(document_id))
-        if room is not None:
-            await room.flush()
+        if room is None:
+            return
+        if browser_state:
+            before = room.ydoc.get_state()
+            room.ydoc.apply_update(browser_state)
+            missing = room.ydoc.get_update(before)
+            if missing != protocol.EMPTY_UPDATE:
+                room.dirty = True
+                await broadcast_update(document_id, missing)
+        await room.flush()
 
     def __len__(self):
         return len(self._rooms)
@@ -132,10 +163,10 @@ class RoomManager:
 rooms = RoomManager()
 
 
-def flush_open_document(document_id) -> None:
+def flush_open_document(document_id, browser_state: bytes | None = None) -> None:
     """
     For synchronous code (REST views): make sure the database has the latest
     content of a document that is open in the editor, e.g. before taking a
     version snapshot. Runs on the server's event loop, where the rooms live.
     """
-    async_to_sync(rooms.flush_document)(str(document_id))
+    async_to_sync(rooms.flush_document)(str(document_id), browser_state)

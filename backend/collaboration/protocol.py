@@ -100,3 +100,4 @@ def awareness_client_states(update: bytes) -> list[tuple[int, bool]]:
     (a client announcing it is leaving).
     """
     return [(client_id, state != "null") for client_id, _clock, state in parse_awareness_update(update)]
+

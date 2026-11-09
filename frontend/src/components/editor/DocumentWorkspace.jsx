@@ -67,6 +67,7 @@ export default function DocumentWorkspace({ documentId, readOnly = false, onAcce
         documentId={documentId}
         canEdit={!readOnly && synced}
         editor={editor}
+        ydoc={ydoc}
         onClose={() => setPanel(null)}
       />
     </>

@@ -117,3 +117,10 @@ class ChangePasswordSerializer(serializers.Serializer):
         except DjangoValidationError as exc:
             raise serializers.ValidationError({"new_password": list(exc.messages)})
         return attrs
+
+
+class SessionPayloadSerializer(serializers.Serializer):
+    """Response of session / login / register (used for the API docs)."""
+
+    authenticated = serializers.BooleanField()
+    user = UserSerializer(allow_null=True)

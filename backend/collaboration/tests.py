@@ -534,3 +534,50 @@ class Sprint6CollaborationTests(TransactionTestCase):
             await a.ws.disconnect()
         finally:
             rooms_module.SAVE_DELAY_SECONDS = 2.0
+
+
+class SnapshotRaceTests(TransactionTestCase):
+    """Regression (found while making README screenshots in Sprint 7): a version
+    saved right after typing missed the last keystrokes, because the HTTP
+    request overtook the WebSocket messages."""
+
+    def setUp(self):
+        rooms._rooms.clear()
+        self.owner = User.objects.create_user(email="o@example.com", password="x", display_name="Owner")
+        self.document = Document.objects.create(owner=self.owner, title="Doc")
+
+    async def test_snapshot_includes_keystrokes_still_in_flight(self):
+        from documents.views import take_snapshot
+
+        rooms_module.SAVE_DELAY_SECONDS = 60
+        try:
+            a = YClient(self.owner, self.document.id)
+            b = YClient(self.owner, self.document.id)
+            await a.connect()
+            await b.connect()
+            await a.insert(0, "first ")
+            await b.receive_update()
+
+            # A types more, but the WebSocket message has not been delivered yet...
+            before = a.doc.get_state()
+            a.text.insert(len(a.text), "last words")
+            in_flight = a.doc.get_update(before)
+
+            # ...when A's "save a version" request (with A's full state) arrives.
+            version = await database_sync_to_async(take_snapshot)(
+                self.document, self.owner, browser_state=a.doc.get_update()
+            )
+            self.assertEqual(text_of(bytes(version.yjs_state)), "first last words")
+
+            # B gets the merged keystrokes right away...
+            await b.receive_update()
+            self.assertEqual(str(b.text), "first last words")
+            # ...and when the late message finally arrives, nothing is duplicated.
+            await a.ws.send_to(bytes_data=create_update_message(in_flight))
+            await asyncio.sleep(0.1)
+            room = rooms.get(str(self.document.id))
+            self.assertEqual(text_of(room.ydoc.get_update()), "first last words")
+            await a.ws.disconnect()
+            await b.ws.disconnect()
+        finally:
+            rooms_module.SAVE_DELAY_SECONDS = 2.0

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import * as Y from "yjs";
 import { useToast } from "../../context/ToastContext.jsx";
 import { documentsApi } from "../../services/documents.js";
 import { fullDate, timeAgo } from "../../utils/date.js";
@@ -10,13 +11,32 @@ import VersionPreview from "./VersionPreview.jsx";
 
 const versionName = (v) => v.label || `إصدار ${fullDate(v.created_at)}`;
 
+// The server rejects request bodies over ~2.5 MB.
+const MAX_STATE_CHARS = 2_000_000;
+
+/**
+ * Our full Yjs state, sent along with "save version" / "restore". The last
+ * keystrokes may still be on their way over the WebSocket; the server merges
+ * this state first, so the snapshot really contains what we see.
+ */
+function snapshotBody(ydoc) {
+  if (!ydoc) return {};
+  const bytes = Y.encodeStateAsUpdate(ydoc);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  const encoded = btoa(binary);
+  return encoded.length <= MAX_STATE_CHARS ? { browser_state: encoded } : {};
+}
+
 /**
  * Saved versions of a document:
  *  - editors can save the current content as a named version
  *  - everyone can preview a version (read-only)
  *  - editors can restore one (a backup of the current content is saved first)
  */
-export default function VersionsPanel({ open, documentId, canEdit, editor, onClose }) {
+export default function VersionsPanel({ open, documentId, canEdit, editor, ydoc, onClose }) {
   const toast = useToast();
   const [versions, setVersions] = useState(null);
   const [error, setError] = useState("");
@@ -50,7 +70,7 @@ export default function VersionsPanel({ open, documentId, canEdit, editor, onClo
     setSaving(true);
     setLabelError("");
     try {
-      const version = await documentsApi.saveVersion(documentId, label.trim());
+      const version = await documentsApi.saveVersion(documentId, label.trim(), snapshotBody(ydoc));
       setVersions((list) => [version, ...(list || [])]);
       setLabel("");
       toast.success("تم حفظ الإصدار.");
@@ -74,7 +94,7 @@ export default function VersionsPanel({ open, documentId, canEdit, editor, onClo
     setRestoring(true);
     try {
       // 1) The server saves a backup of the current content and logs the restore.
-      await documentsApi.restoreVersion(documentId, preview.id);
+      await documentsApi.restoreVersion(documentId, preview.id, snapshotBody(ydoc));
       // 2) Put the old content into the LIVE editor. Yjs turns this into normal
       //    edits, so every connected user sees it and the server saves it.
       editor.commands.setContent(previewEditor.getJSON());

@@ -25,9 +25,12 @@ export const documentsApi = {
   // --- activity log & versions ---
   activity: (id, page = 1) => apiRequest(`${docUrl(id)}activity/?page=${page}`),
   versions: (id) => apiRequest(`${docUrl(id)}versions/`),
-  saveVersion: (id, label) => apiRequest(`${docUrl(id)}versions/`, { method: "POST", body: { label } }),
+  // browserState: see snapshotBody() in VersionsPanel.jsx
+  saveVersion: (id, label, browserState) =>
+    apiRequest(`${docUrl(id)}versions/`, { method: "POST", body: { label, ...browserState } }),
   version: (id, versionId) => apiRequest(`${docUrl(id)}versions/${versionId}/`),
-  restoreVersion: (id, versionId) => apiRequest(`${docUrl(id)}versions/${versionId}/restore/`, { method: "POST" }),
+  restoreVersion: (id, versionId, browserState) =>
+    apiRequest(`${docUrl(id)}versions/${versionId}/restore/`, { method: "POST", body: { ...browserState } }),
 };
 
 export const TITLE_MAX_LENGTH = 200;

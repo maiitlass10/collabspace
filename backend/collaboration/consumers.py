@@ -18,6 +18,7 @@ Security
   color) always comes from the logged-in account, and a connection may only
   update the Yjs client ids it owns.
 """
+import asyncio
 import json
 import logging
 import time
@@ -44,6 +45,8 @@ MAX_MESSAGE_BYTES = 5 * 1024 * 1024  # 5 MB
 MAX_CLIENT_IDS_PER_CONNECTION = 4
 # Write "X edited the document" to the activity log at most once a minute.
 EDIT_LOG_INTERVAL_SECONDS = 60
+# Keep references to fire-and-forget tasks so they are not garbage-collected.
+background_tasks: set[asyncio.Task] = set()
 
 
 class DocumentConsumer(AsyncWebsocketConsumer):
@@ -157,6 +160,13 @@ class DocumentConsumer(AsyncWebsocketConsumer):
         if now - self.edit_logged_at < EDIT_LOG_INTERVAL_SECONDS:
             return
         self.edit_logged_at = now
+        # In the background: relaying live edits should not wait for a
+        # database write.
+        task = asyncio.create_task(self.write_edit_log())
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
+
+    async def write_edit_log(self):
         try:
             await database_sync_to_async(log_edit)(self.document_id, self.user)
         except Exception:

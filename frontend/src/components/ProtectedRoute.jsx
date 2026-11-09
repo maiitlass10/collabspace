@@ -17,11 +17,21 @@ export function ProtectedRoute() {
   return <Outlet />;
 }
 
-/** Login/register pages: logged-in users are sent to the dashboard. */
+/** Where to go after logging in: the page that was requested, or the dashboard. */
+export function redirectTarget(location) {
+  const from = location.state?.from;
+  // Only paths inside this app (never "//other-site.com").
+  return typeof from === "string" && from.startsWith("/") && !from.startsWith("//") ? from : "/";
+}
+
+/** Login/register pages: logged-in users are sent on (see redirectTarget). */
 export function GuestRoute() {
   const { status } = useAuth();
+  const location = useLocation();
 
   if (status === "loading") return <FullPageLoader />;
-  if (status === "authenticated") return <Navigate to="/" replace />;
+  // This also runs right after a successful login, so it must use the same
+  // target as LoginPage; otherwise it would win the race and always go to "/".
+  if (status === "authenticated") return <Navigate to={redirectTarget(location)} replace />;
   return <Outlet />;
 }

@@ -25,3 +25,9 @@ Thumbs.db
 # Misc
 *.log
 *.png
+!docs/screenshots/*.png
+
+# Playwright (end-to-end tests)
+frontend/test-results/
+frontend/playwright-report/
+
