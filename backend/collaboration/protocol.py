@@ -47,18 +47,56 @@ def read_var_bytes(data: bytes, pos: int = 0) -> tuple[bytes, int]:
     return data[pos:end], end
 
 
-def awareness_client_states(update: bytes) -> list[tuple[int, bool]]:
+def parse_awareness_update(update: bytes) -> list[tuple[int, int, str]]:
     """
-    Parse an awareness update payload.
-    Returns [(client_id, is_alive)], where is_alive is False for "null" states
-    (a client announcing it is leaving).
+    Parse an awareness update payload:
+        count, then for each client: client_id, clock, state (JSON string)
+    Returns [(client_id, clock, state_json)].
     """
     decoder = Decoder(update)
     count = decoder.read_var_uint()
     result = []
     for _ in range(count):
         client_id = decoder.read_var_uint()
-        decoder.read_var_uint()  # clock
+        clock = decoder.read_var_uint()
         state = decoder.read_var_string()
-        result.append((client_id, state != "null"))
+        result.append((client_id, clock, state))
     return result
+
+
+def write_var_uint(value: int) -> bytes:
+    """Encode a lib0 var-uint."""
+    out = bytearray()
+    while value > 0x7F:
+        out.append(0x80 | (value & 0x7F))
+        value >>= 7
+    out.append(value)
+    return bytes(out)
+
+
+def write_var_string(text: str) -> bytes:
+    """
+    Encode a lib0 string: byte length, then UTF-8 bytes.
+    (pycrdt's Encoder.write_var_string writes the CHARACTER count, which
+    breaks any non-ASCII text such as Arabic names, so we do it ourselves.)
+    """
+    data = text.encode("utf-8")
+    return write_var_uint(len(data)) + data
+
+
+def encode_awareness_update(entries: list[tuple[int, int, str]]) -> bytes:
+    """The reverse of parse_awareness_update."""
+    out = bytearray(write_var_uint(len(entries)))
+    for client_id, clock, state in entries:
+        out += write_var_uint(client_id)
+        out += write_var_uint(clock)
+        out += write_var_string(state)
+    return bytes(out)
+
+
+def awareness_client_states(update: bytes) -> list[tuple[int, bool]]:
+    """
+    Returns [(client_id, is_alive)], where is_alive is False for "null" states
+    (a client announcing it is leaving).
+    """
+    return [(client_id, state != "null") for client_id, _clock, state in parse_awareness_update(update)]

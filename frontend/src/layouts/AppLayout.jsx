@@ -47,7 +47,7 @@ export default function AppLayout() {
         </div>
         <div className="topbar-user">
           <span className="topbar-name">{user.display_name}</span>
-          <Avatar name={user.display_name} />
+          <Avatar name={user.display_name} color={user.color} />
         </div>
       </header>
 

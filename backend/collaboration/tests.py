@@ -190,14 +190,9 @@ class AwarenessTests(TransactionTestCase):
 
     @staticmethod
     def awareness_message(client_id, clock, state_json):
-        from pycrdt import Encoder, create_awareness_message
+        from pycrdt import create_awareness_message
 
-        encoder = Encoder()
-        encoder.write_var_uint(1)
-        encoder.write_var_uint(client_id)
-        encoder.write_var_uint(clock)
-        encoder.write_var_string(state_json)
-        return create_awareness_message(encoder.to_bytes())
+        return create_awareness_message(protocol.encode_awareness_update([(client_id, clock, state_json)]))
 
     async def test_presence_is_relayed_and_cleared_on_disconnect(self):
         a = YClient(self.owner, self.document.id)
@@ -256,6 +251,124 @@ class ProtocolHelpersTests(TransactionTestCase):
             decoded, _ = protocol.read_var_uint(encoder.to_bytes())
             self.assertEqual(decoded, value)
 
+    def test_our_var_uint_matches_pycrdt(self):
+        from pycrdt import Encoder
+
+        for value in [0, 1, 127, 128, 300, 2**20, 2**35]:
+            encoder = Encoder()
+            encoder.write_var_uint(value)
+            self.assertEqual(protocol.write_var_uint(value), encoder.to_bytes())
+
+    def test_arabic_awareness_round_trip(self):
+        entries = [(7, 3, '{"user":{"name":"مالك"}}'), (8, 1, "null")]
+        encoded = protocol.encode_awareness_update(entries)
+        self.assertEqual(protocol.parse_awareness_update(encoded), entries)
+
     def test_truncated_bytes_raise(self):
         with self.assertRaises(ValueError):
             protocol.read_var_bytes(b"\x05ab")
+
+
+class PresenceSecurityTests(TransactionTestCase):
+    """Sprint 4: the server decides who you are in the editor."""
+
+    def setUp(self):
+        rooms._rooms.clear()
+        self.owner = User.objects.create_user(email="o@example.com", password="x", display_name="مالك")
+        self.document = Document.objects.create(owner=self.owner, title="Doc")
+        self.message = AwarenessTests.awareness_message
+
+    @staticmethod
+    def states_in(message: bytes) -> dict:
+        """{client_id: state_dict_or_None} from an awareness message."""
+        import json
+
+        assert message[0] == protocol.MSG_AWARENESS
+        payload, _ = protocol.read_var_bytes(message, 1)
+        return {cid: json.loads(state) for cid, _clock, state in protocol.parse_awareness_update(payload)}
+
+    async def connected_pair(self):
+        a = YClient(self.owner, self.document.id)
+        b = YClient(self.owner, self.document.id)
+        await a.connect()
+        await b.connect()
+        return a, b
+
+    async def test_name_and_color_come_from_the_account(self):
+        from accounts.presence import presence_color
+
+        a, b = await self.connected_pair()
+        fake = '{"user":{"name":"المدير","color":"#000000","id":999},"cursor":{"anchor":1}}'
+        await a.ws.send_to(bytes_data=self.message(111, 1, fake))
+
+        state = self.states_in(await b.ws.receive_from(timeout=2))[111]
+        expected = {"id": self.owner.pk, "name": "مالك", "color": presence_color(self.owner)}
+        self.assertEqual(state["user"], expected, "the claimed identity is replaced")
+        self.assertEqual(state["cursor"], {"anchor": 1}, "other fields (the cursor) are kept")
+
+        # Newcomers are also told the trusted identity, not the fake one.
+        c = YClient(self.owner, self.document.id)
+        await c.connect()
+        self.assertEqual(self.states_in(c.pending[0])[111]["user"], expected)
+        for client in (a, b, c):
+            await client.ws.disconnect()
+
+    async def test_cannot_overwrite_another_connections_presence(self):
+        a, b = await self.connected_pair()
+        await a.ws.send_to(bytes_data=self.message(111, 1, '{"cursor":"a"}'))
+        await b.ws.receive_from(timeout=2)
+
+        # B pretends to be A's client id: ignored, nothing is broadcast.
+        await b.ws.send_to(bytes_data=self.message(111, 2, '{"cursor":"hijacked"}'))
+        self.assertTrue(await a.ws.receive_nothing(timeout=0.2))
+        room = rooms.get(str(self.document.id))
+        self.assertEqual(room.awareness.states[111]["cursor"], "a")
+
+        # B pretending A left is ignored too.
+        await b.ws.send_to(bytes_data=self.message(111, 3, "null"))
+        self.assertTrue(await a.ws.receive_nothing(timeout=0.2))
+        self.assertIn(111, room.awareness.states)
+        await a.ws.disconnect()
+        await b.ws.disconnect()
+
+    async def test_client_id_is_released_on_disconnect(self):
+        a, b = await self.connected_pair()
+        await a.ws.send_to(bytes_data=self.message(111, 1, "{}"))
+        await b.ws.receive_from(timeout=2)
+        await a.ws.disconnect()
+        await b.ws.receive_from(timeout=2)  # "A left"
+        room = rooms.get(str(self.document.id))
+        self.assertNotIn(111, room.awareness_owners)
+        await b.ws.disconnect()
+
+    async def test_invalid_presence_is_dropped(self):
+        a, b = await self.connected_pair()
+        await a.ws.send_to(bytes_data=self.message(111, 1, "not json"))
+        await a.ws.send_to(bytes_data=self.message(112, 1, "[1, 2]"))
+        self.assertTrue(await b.ws.receive_nothing(timeout=0.2))
+        await a.ws.disconnect()
+        await b.ws.disconnect()
+
+    async def test_limit_on_client_ids_per_connection(self):
+        from .consumers import MAX_CLIENT_IDS_PER_CONNECTION
+
+        a, b = await self.connected_pair()
+        for i in range(MAX_CLIENT_IDS_PER_CONNECTION):
+            await a.ws.send_to(bytes_data=self.message(500 + i, 1, "{}"))
+            await b.ws.receive_from(timeout=2)
+        await a.ws.send_to(bytes_data=self.message(999, 1, "{}"))
+        self.assertTrue(await b.ws.receive_nothing(timeout=0.2))
+        await a.ws.disconnect()
+        await b.ws.disconnect()
+
+
+class PresenceColorTests(TransactionTestCase):
+    def test_color_is_stable_and_valid(self):
+        import re
+
+        from accounts.presence import PRESENCE_COLORS, presence_color
+
+        user = User.objects.create_user(email="c@example.com", password="x", display_name="C")
+        self.assertEqual(presence_color(user), presence_color(user))
+        for color in PRESENCE_COLORS:
+            self.assertRegex(color, re.compile(r"^#[0-9a-f]{6}$"))

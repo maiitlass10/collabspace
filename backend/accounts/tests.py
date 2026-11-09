@@ -114,6 +114,12 @@ class LoginLogoutTests(AuthTestMixin, TestCase):
         self.assertIn("sessionid", response.cookies)
         self.assertTrue(response.cookies["sessionid"]["httponly"])
 
+    def test_session_includes_presence_color(self):
+        self.post("auth-login", {"email": "omar@example.com", "password": STRONG_PASSWORD})
+        user = self.client.get(reverse("auth-session")).json()["user"]
+        self.assertRegex(user["color"], r"^#[0-9a-f]{6}$")
+        self.assertEqual(user["display_name"], "عمر")
+
     def test_login_email_is_case_insensitive(self):
         response = self.post("auth-login", {"email": "OMAR@Example.com", "password": STRONG_PASSWORD})
         self.assertEqual(response.status_code, 200)

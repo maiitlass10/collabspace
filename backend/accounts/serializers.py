@@ -3,16 +3,24 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
+from .presence import presence_color
+
 User = get_user_model()
 
 
 class UserSerializer(serializers.ModelSerializer):
     """Public representation of the current user (never includes the password)."""
 
+    # The color collaborators see for this user (avatar, caret, selection).
+    color = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ["id", "email", "display_name", "date_joined"]
+        fields = ["id", "email", "display_name", "color", "date_joined"]
         read_only_fields = fields
+
+    def get_color(self, user) -> str:
+        return presence_color(user)
 
 
 class RegisterSerializer(serializers.Serializer):

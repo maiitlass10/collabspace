@@ -33,6 +33,9 @@ class Room:
         # The server is not a participant: remove its own (empty) presence
         # entry so clients never see a phantom user.
         self.awareness.set_local_state(None)
+        # Which connection owns which Yjs client id (client_id -> channel name),
+        # so one browser cannot overwrite another browser's presence.
+        self.awareness_owners: dict[int, str] = {}
         self.connections = 0
         self.dirty = False
         self._save_task: asyncio.Task | None = None

@@ -7,12 +7,13 @@ function colorFor(name = "") {
   return COLORS[hash % COLORS.length];
 }
 
-export default function Avatar({ name = "", size = 36 }) {
+/** `color` comes from the server (user.color); fall back to a name-based one. */
+export default function Avatar({ name = "", size = 36, color }) {
   const initial = name.trim().charAt(0).toUpperCase() || "?";
   return (
     <span
       className="avatar"
-      style={{ width: size, height: size, background: colorFor(name), fontSize: size * 0.42 }}
+      style={{ width: size, height: size, background: color || colorFor(name), fontSize: size * 0.42 }}
       title={name}
       aria-hidden="true"
     >

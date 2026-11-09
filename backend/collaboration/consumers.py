@@ -11,13 +11,18 @@ Security
 * We accept the socket and then close it with an application code, so the
   browser can show a clear message and stop reconnecting:
       4401 = not logged in, 4403 = no access / not found, 4413 = message too big
+* Presence (awareness) is rewritten by the server: the `user` field (name,
+  color) always comes from the logged-in account, and a connection may only
+  update the Yjs client ids it owns.
 """
+import json
 import logging
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 from pycrdt import create_awareness_message, create_sync_message, create_update_message, handle_sync_message
 
+from accounts.presence import presence_identity
 from documents.access import can_edit, get_document_and_role
 
 from . import protocol
@@ -29,6 +34,8 @@ CLOSE_UNAUTHENTICATED = 4401
 CLOSE_FORBIDDEN = 4403
 CLOSE_TOO_LARGE = 4413
 MAX_MESSAGE_BYTES = 5 * 1024 * 1024  # 5 MB
+# A browser tab normally uses ONE Yjs client id; allow a few for safety.
+MAX_CLIENT_IDS_PER_CONNECTION = 4
 
 
 class DocumentConsumer(AsyncWebsocketConsumer):
@@ -37,6 +44,7 @@ class DocumentConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         self.document_id = str(self.scope["url_route"]["kwargs"]["document_id"])
         self.group_name = f"document_{self.document_id}"
+        # Yjs client ids this connection owns (their presence is ours to change).
         self.awareness_client_ids: set[int] = set()
         user = self.scope.get("user")
 
@@ -53,6 +61,7 @@ class DocumentConsumer(AsyncWebsocketConsumer):
 
         self.user = user
         self.role = role
+        self.presence = presence_identity(user)
         self.room = await rooms.join(self.document_id)
         await self.channel_layer.group_add(self.group_name, self.channel_name)
 
@@ -77,6 +86,9 @@ class DocumentConsumer(AsyncWebsocketConsumer):
                 room.awareness.remove_awareness_states(ids, origin=self.channel_name)
                 update = room.awareness.encode_awareness_update(ids)
                 await self.broadcast(create_awareness_message(update))
+            for cid in self.awareness_client_ids:
+                if room.awareness_owners.get(cid) == self.channel_name:
+                    del room.awareness_owners[cid]
         except Exception:
             logger.exception("Error while cleaning up presence on document %s", self.document_id)
         finally:
@@ -131,15 +143,46 @@ class DocumentConsumer(AsyncWebsocketConsumer):
 
     async def handle_awareness(self, message: bytes):
         payload, _ = protocol.read_var_bytes(message, 1)
-        self.room.awareness.apply_awareness_update(payload, origin=self.channel_name)
-        # Track only the clients the server actually accepted. (Per the Yjs
-        # protocol, an unknown client's first state with clock 0 is ignored.)
-        for client_id, _alive in protocol.awareness_client_states(payload):
-            if client_id in self.room.awareness.states:
-                self.awareness_client_ids.add(client_id)
-            else:
-                self.awareness_client_ids.discard(client_id)
-        await self.broadcast(message)
+        entries = []
+        for client_id, clock, state_json in protocol.parse_awareness_update(payload):
+            if not self.claim_client_id(client_id):
+                continue  # someone else's presence: not ours to change
+            state = self.trusted_state(state_json)
+            if state is not None:
+                entries.append((client_id, clock, state))
+        if not entries:
+            return
+        clean = protocol.encode_awareness_update(entries)
+        self.room.awareness.apply_awareness_update(clean, origin=self.channel_name)
+        await self.broadcast(create_awareness_message(clean))
+
+    def claim_client_id(self, client_id: int) -> bool:
+        """True if this connection owns `client_id` (claiming it if it is free)."""
+        owner = self.room.awareness_owners.get(client_id)
+        if owner == self.channel_name:
+            return True
+        if owner is not None or len(self.awareness_client_ids) >= MAX_CLIENT_IDS_PER_CONNECTION:
+            return False
+        self.room.awareness_owners[client_id] = self.channel_name
+        self.awareness_client_ids.add(client_id)
+        return True
+
+    def trusted_state(self, state_json: str) -> str | None:
+        """
+        Replace the `user` field with the identity of the logged-in account.
+        Keeps everything else (e.g. the cursor position). Returns None for an
+        invalid state, which is then dropped.
+        """
+        try:
+            state = json.loads(state_json)
+        except ValueError:
+            return None
+        if state is None:
+            return "null"  # the client is leaving
+        if not isinstance(state, dict):
+            return None
+        state["user"] = self.presence
+        return json.dumps(state, separators=(",", ":"))
 
     # --- fan-out to the other users in the same document --------------------
     async def broadcast(self, data: bytes):

@@ -1,11 +1,16 @@
 import { Link } from "react-router";
+import { useAuth } from "../../context/AuthContext.jsx";
 import useCollaboration from "../../hooks/useCollaboration.js";
+import usePresence from "../../hooks/usePresence.js";
 import CollaborativeEditor from "./CollaborativeEditor.jsx";
 import ConnectionBadge from "./ConnectionBadge.jsx";
+import PresenceList from "./PresenceList.jsx";
 
 /** Mounted only after the REST API confirmed we may open this document. */
 export default function DocumentWorkspace({ documentId }) {
-  const { ydoc, status, synced, fatalError } = useCollaboration(documentId);
+  const { user } = useAuth();
+  const { ydoc, provider, status, synced, fatalError } = useCollaboration(documentId);
+  const users = usePresence(provider, user.id);
 
   if (fatalError) {
     return (
@@ -26,8 +31,11 @@ export default function DocumentWorkspace({ documentId }) {
     <>
       <div className="workspace-bar">
         <ConnectionBadge status={status} />
+        {status === "connected" && <PresenceList users={users} />}
       </div>
-      {ydoc && <CollaborativeEditor key={documentId} ydoc={ydoc} synced={synced} />}
+      {ydoc && provider && (
+        <CollaborativeEditor key={documentId} ydoc={ydoc} provider={provider} user={user} synced={synced} />
+      )}
     </>
   );
 }

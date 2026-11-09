@@ -1165,6 +1165,90 @@ a:hover {
   pointer-events: none;
 }
 
+/* ---------- Presence (who is here) ---------- */
+.presence {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.presence-label {
+  font-size: 13px;
+  color: var(--color-muted);
+}
+.presence-list {
+  display: flex;
+  align-items: center;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.presence-item {
+  position: relative;
+  display: inline-grid;
+  border: 2px solid var(--color-surface);
+  border-radius: 50%;
+  margin-inline-start: -8px; /* overlap the avatars a little */
+  transition: transform 0.15s ease;
+}
+.presence-item:first-child {
+  margin-inline-start: 0;
+}
+.presence-item:hover {
+  transform: translateY(-2px);
+  z-index: 1;
+}
+.presence-item--self {
+  box-shadow: 0 0 0 2px var(--presence-color, var(--color-primary));
+}
+.presence-count {
+  position: absolute;
+  bottom: -4px;
+  inset-inline-end: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--color-text);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+.presence-more {
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  background: var(--color-border);
+  color: var(--color-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* ---------- Other users' carets and selections (Tiptap CollaborationCaret) ---------- */
+.collaboration-carets__caret {
+  position: relative;
+  margin-inline: -1px;
+  border-inline: 1px solid;
+  word-break: normal;
+  pointer-events: none;
+}
+.collaboration-carets__label {
+  position: absolute;
+  top: -1.5em;
+  inset-inline-start: -1px;
+  padding: 1px 6px;
+  border-radius: 4px 4px 4px 0;
+  color: #fff;
+  font-family: var(--font);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  user-select: none;
+}
+
 @media (max-width: 768px) {
   .editor-content {
     padding: 20px 16px;

@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@tiptap/extension-collaboration": "^3.32.2",
+    "@tiptap/extension-collaboration-caret": "3.32.2",
     "@tiptap/extension-text-align": "^3.32.2",
     "@tiptap/extensions": "^3.32.2",
     "@tiptap/pm": "^3.32.2",

@@ -13,7 +13,7 @@ export default function ProfilePage() {
       </header>
 
       <section className="card profile-card">
-        <Avatar name={user.display_name} size={72} />
+        <Avatar name={user.display_name} color={user.color} size={72} />
         <div>
           <h2 className="profile-name">{user.display_name}</h2>
           <p className="muted">
